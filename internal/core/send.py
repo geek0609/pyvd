@@ -44,7 +44,7 @@ def message_file_id(message: types.Message) -> str:
     raise MediaError("Telegram did not return a reusable media ID.")
 
 
-def _media_type(item: MediaItem, caption: str, spoiler: bool) -> types.InputMedia:
+def input_media(item: MediaItem, caption: str, spoiler: bool) -> types.InputMedia:
     source = item.file_id or str(item.path)
     if item.delivery_kind == "photo":
         return types.InputMediaPhoto(source, caption=caption, has_spoiler=spoiler)
@@ -158,7 +158,7 @@ class Sender:
                     if item.path and item.path.stat().st_size > self.settings.max_file_size:
                         raise FileTooLarge("The file exceeds the 2 GB limit.")
                 inputs = [
-                    _media_type(item, caption_pending if i == 0 else "", spoiler)
+                    input_media(item, caption_pending if i == 0 else "", spoiler)
                     for i, item in enumerate(batch)
                 ]
                 messages = await self.client.send_media_group(

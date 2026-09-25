@@ -4,6 +4,7 @@ import asyncio
 import logging
 import tempfile
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from hydrogram import Client, enums, types
@@ -19,6 +20,12 @@ from internal.models.media import ChatSettings, Media
 
 
 LOG = logging.getLogger(__name__)
+
+
+@dataclass
+class Delivery:
+    media: Media
+    messages: list[types.Message]
 
 
 class JobRunner:
@@ -59,7 +66,7 @@ class JobRunner:
         self, request: Request, chat: ChatSettings, target_chat_id: int,
         reply_to: int | None = None, spoiler: bool = False,
         status: types.Message | None = None, inline: bool = False,
-    ) -> Media:
+    ) -> Delivery:
         site = self.settings.site(request.extractor_id)
         if site.disabled or request.extractor_id in chat.disabled_extractors:
             raise MediaError("This site is disabled in this chat.")
@@ -68,16 +75,18 @@ class JobRunner:
         async with self._lock(request.key), self.capacity:
             cached = await self.store.cached_media(request.extractor_id, request.content_id) if self.settings.caching else None
             if cached and (not inline or len(cached.items) == 1):
+                if chat.kind == "group" and len(cached.items) > chat.media_album_limit:
+                    raise MediaError("This post exceeds this group's album limit.")
                 if chat.kind == "group" and cached.nsfw and not chat.nsfw:
                     raise MediaError("NSFW media is disabled in this group.")
                 try:
                     await self._status(status, "Sending cached media…")
-                    await self.sender.send(
+                    messages = await self.sender.send(
                         target_chat_id, cached,
                         format_caption(cached, chat, self.settings, self.username),
                         reply_to=reply_to, silent=chat.silent, spoiler=spoiler, status=status,
                     )
-                    return cached
+                    return Delivery(cached, messages)
                 except Exception as exc:
                     code = str(exc).upper()
                     if not any(part in code for part in ("FILE_ID_INVALID", "FILE_REFERENCE", "MEDIA_EMPTY", "FILE_ID")):
@@ -98,7 +107,7 @@ class JobRunner:
                 await self._status(status, "Preparing media…")
                 media = await prepare(media, self.settings)
                 await self._status(status, "Uploading media…")
-                await self.sender.send(
+                messages = await self.sender.send(
                     target_chat_id, media,
                     format_caption(media, chat, self.settings, self.username),
                     reply_to=reply_to, silent=chat.silent, spoiler=spoiler, status=status,
@@ -108,4 +117,4 @@ class JobRunner:
                         await self.store.save_media(media)
                     except Exception:
                         LOG.exception("could not cache uploaded media for %s", request.key)
-                return media
+                return Delivery(media, messages)

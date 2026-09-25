@@ -10,6 +10,7 @@ from hydrogram import Client, enums, filters, idle, types
 from internal.config.settings import Settings, load_settings
 from internal.bot.admin import PERIODS, show_error, show_stats, stats_keyboard, stats_text
 from internal.bot.settings import handle_callback, show_settings
+from internal.bot.inline import Inline
 from internal.core.errors import MediaError
 from internal.core.tasks import JobRunner
 from internal.database.store import Store
@@ -44,12 +45,15 @@ class Bot:
         self.settings = settings
         self.store = store
         self.runner: JobRunner | None = None
+        self.inline = Inline(client, settings, store)
         self.username = ""
 
     async def start(self) -> None:
         me = await self.client.get_me()
         self.username = me.username or "pyvd"
         self.runner = JobRunner(self.client, self.settings, self.store, self.username)
+        self.inline.runner = self.runner
+        self.inline.username = self.username
         LOG.info("started bot @%s", self.username)
 
     async def on_message(self, _: Client, message: types.Message) -> None:
@@ -128,6 +132,9 @@ class Bot:
         if await handle_callback(self.client, self.store, self.settings, query):
             return
         data = query.data or ""
+        if data == "inline:loading":
+            await query.answer("Still processing this media.", show_alert=True)
+            return
         if data.startswith("stats:") and query.from_user.id in self.settings.admins:
             period = data.partition(":")[2]
             if period in {*PERIODS, "all"}:
@@ -154,6 +161,8 @@ async def run() -> None:
     bot = Bot(app, settings, store)
     app.on_message(filters.text & ~filters.bot)(bot.on_message)
     app.on_callback_query()(bot.on_callback)
+    app.on_inline_query()(bot.inline.query)
+    app.on_chosen_inline_result()(bot.inline.chosen)
     try:
         async with app:
             await bot.start()
