@@ -73,7 +73,7 @@ class Bot:
             return
         await self.store.chat(update.chat.id, "group")
         await self.client.send_message(
-            update.chat.id, "Thanks for adding me! Use /settings to configure this group."
+            update.chat.id, "Thanks for adding PyVD! Use /settings to configure this group."
         )
 
     async def on_message(self, _: Client, message: types.Message) -> None:
@@ -90,7 +90,7 @@ class Bot:
         text = message.text.strip()
         command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text.startswith("/") else ""
         if command == "/start":
-            await message.reply("Send me a media link and I’ll download it for you. Use /settings in a group to change its options.")
+            await message.reply("I’m PyVD. Send me a media link and I’ll download it. Use /settings in a group to change its options.")
             return
         if command == "/extractors":
             await message.reply("Supported sites: " + ", ".join(sorted(SITE_NAMES.values())))
