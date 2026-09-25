@@ -1,0 +1,22 @@
+services:
+  pyvd:
+    build: .
+    container_name: pyvd
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ${GOVD_PRIVATE_DIR:-../govd/private}:/app/private:ro
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+    networks:
+      - govd-network
+      - proxy_net
+
+networks:
+  govd-network:
+    external: true
+    name: govd_govd-network
+  proxy_net:
+    external: true
+    name: proxy_net
