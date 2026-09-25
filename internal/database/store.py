@@ -115,13 +115,8 @@ class Store:
             return None
         items = []
         for item in item_rows:
-            kind = item["kind"]
-            if kind == "video" and item["video_codec"] not in {"avc", None}:
-                kind = "document"
-            if kind == "audio" and item["audio_codec"] not in {"aac", "mp3", None}:
-                kind = "document"
             items.append(MediaItem(
-                kind=kind, file_id=item["file_id"], format_id=item["format_id"],
+                kind=item["kind"], file_id=item["file_id"], format_id=item["format_id"],
                 size=item["file_size"] or 0, duration=item["duration"] or 0,
                 width=item["width"] or 0, height=item["height"] or 0,
                 title=item["title"] or "", artist=item["artist"] or "",
@@ -151,15 +146,12 @@ class Store:
                 item_id = await db.fetchval(
                     "INSERT INTO media_item (media_id) VALUES ($1) RETURNING id", media_id,
                 )
-                kind = item.kind if item.kind != "document" else (
-                    "video" if item.video_codec else "audio"
-                )
                 await db.execute(
                     "INSERT INTO media_format (format_id, item_id, file_id, type, "
                     "audio_codec, video_codec, duration, file_size, title, artist, width, height, bitrate) "
                     "VALUES ($1, $2, $3, $4::media_type, $5::media_codec, $6::media_codec, "
                     "$7, $8, $9, $10, $11, $12, $13)",
-                    item.format_id[:100], item_id, item.file_id, kind,
+                    item.format_id[:100], item_id, item.file_id, item.kind,
                     item.audio_codec or None, item.video_codec or None,
                     item.duration or None, item.size or None, item.title or None,
                     item.artist or None, item.width or None, item.height or None,

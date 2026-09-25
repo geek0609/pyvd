@@ -6,7 +6,7 @@ from pathlib import Path
 
 @dataclass
 class MediaItem:
-    kind: str  # photo, video, audio, or document
+    kind: str  # photo, video, or audio; unsupported codecs are sent as documents
     path: Path | None = None
     file_id: str = ""
     format_id: str = "default"
@@ -20,6 +20,16 @@ class MediaItem:
     video_codec: str = ""
     bitrate: int = 0
     thumbnail: Path | None = None
+
+    @property
+    def delivery_kind(self) -> str:
+        if self.kind == "video" and (
+            self.video_codec != "avc" or self.audio_codec not in {"", "aac", "mp3"}
+        ):
+            return "document"
+        if self.kind == "audio" and self.audio_codec not in {"aac", "mp3"}:
+            return "document"
+        return self.kind
 
 
 @dataclass
