@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from internal.config.settings import Settings
-from internal.core.errors import FileTooLarge, NoMedia
+from internal.core.errors import FileTooLarge, MediaError, NoMedia
 from internal.extractors.cookies import job_cookie_file
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
@@ -57,7 +57,7 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
     cookie = job_cookie_file(settings, request.extractor_id, workdir)
     command = [
         sys.executable, "-m", "gallery_dl", "--config-ignore", "--quiet",
-        "--destination", str(gallery_dir), "--range", "1-30",
+        "--destination", str(gallery_dir), "--range", "1-21",
         "--filesize-max", str(settings.max_file_size), "--write-metadata",
     ]
     proxy = site.download_proxy or site.proxy or settings.proxy
@@ -94,8 +94,10 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
     if not paths:
         LOG.debug("gallery-dl returned %s: %s", process.returncode, stderr.decode(errors="replace")[-500:])
         raise NoMedia("No media was found by the gallery extractor.")
+    if len(paths) > 20:
+        raise MediaError("The post contains more than 20 media items.")
     media = Media(request.extractor_id, request.content_id, request.url, caption=_caption(gallery_dir))
-    for path in paths[:30]:
+    for path in paths:
         suffix = path.suffix.lower()
         kind = "photo" if suffix in PHOTO_SUFFIXES else "audio" if suffix in AUDIO_SUFFIXES else "video"
         size = path.stat().st_size

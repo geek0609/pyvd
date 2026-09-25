@@ -99,8 +99,8 @@ async def _thumbnail(item: MediaItem) -> None:
 async def prepare(media: Media, settings: Settings) -> Media:
     if not media.items:
         raise MediaError("No media was found.")
-    if len(media.items) > 30:
-        raise MediaError("The post contains too many media items.")
+    if len(media.items) > 20:
+        raise MediaError("The post contains more than 20 media items.")
     for item in media.items:
         if item.path is None:
             raise MediaError("A downloaded media file is missing.")

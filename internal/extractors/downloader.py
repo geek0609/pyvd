@@ -96,7 +96,7 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
-        "playlistend": 30,
+        "playlistend": 21,
         "max_filesize": settings.max_file_size,
         "match_filter": duration_filter,
         "progress_hooks": [progress],
@@ -132,10 +132,12 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
     paths = _paths(info, workdir)
     if not paths:
         raise NoMedia("No media file was downloaded.")
+    if len(paths) > 20:
+        raise MediaError("The post contains more than 20 media items.")
     media = Media(request.extractor_id, request.content_id, request.url)
     media.caption = str(info.get("description") or info.get("title") or "")
     media.nsfw = bool(info.get("age_limit") and info["age_limit"] >= 18)
-    for path, entry in paths[:30]:
+    for path, entry in paths:
         size = path.stat().st_size
         if size > settings.max_file_size:
             raise FileTooLarge("The file exceeds the 2 GB limit.")
