@@ -47,14 +47,34 @@ class Bot:
         self.runner: JobRunner | None = None
         self.inline = Inline(client, settings, store)
         self.username = ""
+        self.bot_id = 0
 
     async def start(self) -> None:
         me = await self.client.get_me()
+        self.bot_id = me.id
         self.username = me.username or "pyvd"
         self.runner = JobRunner(self.client, self.settings, self.store, self.username)
         self.inline.runner = self.runner
         self.inline.username = self.username
         LOG.info("started bot @%s", self.username)
+
+    async def on_chat_member_updated(self, _: Client, update: types.ChatMemberUpdated) -> None:
+        old = update.old_chat_member
+        new = update.new_chat_member
+        if not new or new.user.id != self.bot_id:
+            return
+        if old and old.status not in {enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED}:
+            return
+        if new.status not in {enums.ChatMemberStatus.MEMBER, enums.ChatMemberStatus.ADMINISTRATOR}:
+            return
+        if update.chat.type not in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}:
+            return
+        if not allowed(self.settings, update.chat.id, None):
+            return
+        await self.store.chat(update.chat.id, "group")
+        await self.client.send_message(
+            update.chat.id, "Thanks for adding me! Use /settings to configure this group."
+        )
 
     async def on_message(self, _: Client, message: types.Message) -> None:
         if not message.text or not message.from_user:
@@ -163,6 +183,7 @@ async def run() -> None:
     app.on_callback_query()(bot.on_callback)
     app.on_inline_query()(bot.inline.query)
     app.on_chosen_inline_result()(bot.inline.chosen)
+    app.on_chat_member_updated()(bot.on_chat_member_updated)
     try:
         async with app:
             await bot.start()
