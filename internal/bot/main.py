@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from hydrogram import Client, enums, filters, idle, types
 
 from internal.config.settings import Settings, load_settings
+from internal.bot.admin import PERIODS, show_error, show_stats, stats_keyboard, stats_text
+from internal.bot.settings import handle_callback, show_settings
 from internal.core.errors import MediaError
 from internal.core.tasks import JobRunner
 from internal.database.store import Store
@@ -69,6 +71,17 @@ class Bot:
         if command == "/extractors":
             await message.reply("Supported sites: " + ", ".join(sorted(SITE_NAMES.values())))
             return
+        if command == "/settings":
+            await show_settings(self.client, self.store, message)
+            return
+        if command == "/stats":
+            if message.from_user.id in self.settings.admins:
+                await show_stats(self.store, message)
+            return
+        if command == "/derr":
+            if message.from_user.id in self.settings.admins:
+                await show_error(self.store, message, text.partition(" ")[2].strip())
+            return
         if command:
             return
         if "skip" in {tag.lower() for tag in TAG_RE.findall(text)}:
@@ -105,6 +118,27 @@ class Bot:
             except Exception:
                 LOG.exception("could not report failure")
 
+    async def on_callback(self, _: Client, query: types.CallbackQuery) -> None:
+        if not allowed(
+            self.settings, query.message.chat.id if query.message else None,
+            query.from_user.id if query.from_user else None,
+        ):
+            await query.answer()
+            return
+        if await handle_callback(self.client, self.store, self.settings, query):
+            return
+        data = query.data or ""
+        if data.startswith("stats:") and query.from_user.id in self.settings.admins:
+            period = data.partition(":")[2]
+            if period in {*PERIODS, "all"}:
+                await query.answer()
+                await query.edit_message_text(
+                    await stats_text(self.store, period),
+                    reply_markup=stats_keyboard(), parse_mode=enums.ParseMode.DISABLED,
+                )
+                return
+        await query.answer()
+
 
 async def run() -> None:
     settings = load_settings()
@@ -119,6 +153,7 @@ async def run() -> None:
     )
     bot = Bot(app, settings, store)
     app.on_message(filters.text & ~filters.bot)(bot.on_message)
+    app.on_callback_query()(bot.on_callback)
     try:
         async with app:
             await bot.start()
