@@ -23,6 +23,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=builder /app/.venv ./.venv
 COPY internal ./internal
 COPY cmd ./cmd
