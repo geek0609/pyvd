@@ -28,6 +28,12 @@ class Delivery:
     messages: list[types.Message]
 
 
+def stale_youtube_cache(media: Media) -> bool:
+    return media.extractor_id == "youtube" and any(
+        item.kind == "video" and item.delivery_kind == "document" for item in media.items
+    )
+
+
 class JobRunner:
     def __init__(self, client: Client, settings: Settings, store: Store, username: str):
         self.client = client
@@ -74,6 +80,9 @@ class JobRunner:
             raise MediaError("This link is ignored by the site configuration.")
         async with self._lock(request.key), self.capacity:
             cached = await self.store.cached_media(request.extractor_id, request.content_id) if self.settings.caching else None
+            if cached and stale_youtube_cache(cached):
+                LOG.info("refreshing unsupported YouTube video format for %s", request.key)
+                cached = None
             if cached and (not inline or len(cached.items) == 1):
                 if chat.kind == "group" and len(cached.items) > chat.media_album_limit:
                     raise MediaError("This post exceeds this group's album limit.")

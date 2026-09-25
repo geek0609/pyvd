@@ -8,6 +8,8 @@ from internal.extractors.sites import first_supported_url, identify
 def test_govd_site_ids() -> None:
     cases = {
         "https://youtu.be/YE7VzlLtp-4": ("youtube", "YE7VzlLtp-4"),
+        "https://www.youtube.com/watch?v=1qLvAoo33UQ": ("youtube", "1qLvAoo33UQ"),
+        "https://www.youtube.com/shorts/Z9NxQdQ8Rpg": ("youtube", "Z9NxQdQ8Rpg"),
         "https://www.instagram.com/p/Cabc123/": ("instagram", "Cabc123"),
         "https://www.tiktok.com/@user/video/123456": ("tiktok", "123456"),
         "https://x.com/user/status/123456": ("twitter", "123456"),

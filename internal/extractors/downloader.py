@@ -106,6 +106,13 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
         "restrictfilenames": True,
         "ignoreerrors": False,
     }
+    if request.extractor_id == "youtube":
+        options["format"] = (
+            "bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/"
+            "b[ext=mp4][vcodec^=avc1]/"
+            "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best"
+        )
+        options["js_runtimes"] = {"deno": {}, "node": {}}
     if cookie:
         options["cookiefile"] = str(cookie)
     proxy = site.proxy or settings.proxy

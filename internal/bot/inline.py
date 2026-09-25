@@ -9,7 +9,7 @@ from hydrogram import Client, enums, types
 
 from internal.config.settings import Settings
 from internal.core.send import Sender, format_caption, input_media
-from internal.core.tasks import JobRunner
+from internal.core.tasks import JobRunner, stale_youtube_cache
 from internal.database.store import Store
 from internal.extractors.sites import Request, first_supported_url
 
@@ -82,7 +82,7 @@ class Inline:
             chat = await self.store.chat(user_id, "private")
             if self.settings.caching:
                 cached = await self.store.cached_media(request.extractor_id, request.content_id)
-                if cached and len(cached.items) == 1:
+                if cached and len(cached.items) == 1 and not stale_youtube_cache(cached):
                     try:
                         await self.client.edit_inline_media(
                             chosen.inline_message_id,

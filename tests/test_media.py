@@ -6,6 +6,7 @@ from PIL import Image
 
 from internal.core.errors import FileTooLarge
 from internal.core.media import prepare
+from internal.core.tasks import stale_youtube_cache
 from internal.models.media import Media, MediaItem
 
 
@@ -32,3 +33,11 @@ async def test_rejects_file_above_limit_before_processing(tmp_path: Path) -> Non
 def test_unsupported_codec_is_document() -> None:
     assert MediaItem(kind="video", video_codec="hevc", audio_codec="aac").delivery_kind == "document"
     assert MediaItem(kind="video", video_codec="avc", audio_codec="aac").delivery_kind == "video"
+
+
+def test_cached_youtube_document_is_refreshed() -> None:
+    unsupported = MediaItem(kind="video", video_codec="av1", audio_codec="aac")
+    supported = MediaItem(kind="video", video_codec="avc", audio_codec="aac")
+    assert stale_youtube_cache(Media("youtube", "id", "https://youtu.be/id", items=[unsupported]))
+    assert not stale_youtube_cache(Media("youtube", "id", "https://youtu.be/id", items=[supported]))
+    assert not stale_youtube_cache(Media("tiktok", "id", "https://tiktok.com/id", items=[unsupported]))

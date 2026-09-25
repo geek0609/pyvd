@@ -17,9 +17,12 @@ def _settings(tmp_path: Path) -> SimpleNamespace:
 
 
 def test_downloaded_file_is_turned_into_media(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
     class FakeYDL:
         def __init__(self, opts):
             self.opts = opts
+            captured.update(opts)
 
         def __enter__(self):
             return self
@@ -36,6 +39,8 @@ def test_downloaded_file_is_turned_into_media(tmp_path: Path, monkeypatch: pytes
     media = downloader._download(Request("youtube", "video", "https://youtu.be/video"), _settings(tmp_path), tmp_path)
     assert media.items[0].path == tmp_path / "001-video.mp4"
     assert media.items[0].kind == "video"
+    assert captured["format"].startswith("bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]")
+    assert "node" in captured["js_runtimes"]
 
 
 def test_progress_stops_oversized_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
