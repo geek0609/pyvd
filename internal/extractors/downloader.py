@@ -10,6 +10,7 @@ import yt_dlp
 from internal.config.settings import Settings
 from internal.core.errors import DurationTooLong, FileTooLarge, MediaError, NoMedia
 from internal.extractors.cookies import job_cookie_file
+from internal.extractors.gallery import download_gallery, prefer_gallery
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
 
@@ -153,4 +154,9 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
 
 
 async def download(request: Request, settings: Settings, workdir: Path) -> Media:
+    if prefer_gallery(request):
+        try:
+            return await download_gallery(request, settings, workdir)
+        except NoMedia:
+            LOG.info("gallery extraction unavailable for %s; trying yt-dlp", request.extractor_id)
     return await asyncio.to_thread(_download, request, settings, workdir)
