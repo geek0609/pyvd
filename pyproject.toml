@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyvd"
+version = "0.1.0"
+description = "Telegram media downloader compatible with govd storage"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "hydrogram==0.2.0",
+  "tgcrypto>=1.2,<2",
+  "yt-dlp>=2025.1,<2027",
+  "gallery-dl>=1.29,<2",
+  "asyncpg>=0.30,<1",
+  "python-dotenv>=1,<2",
+  "PyYAML>=6,<7",
+  "Pillow>=11,<13",
+  "pillow-heif>=1,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2"]
+
+[tool.setuptools.packages.find]
+include = ["internal*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
