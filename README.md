@@ -55,7 +55,9 @@ directory. Rollback means stopping `pyvd` and starting the original `bot`.
 
 ## Commands
 
-Send a supported link in private chat or a group. `/extractors` lists sites.
+Send a supported link in private chat or a group. `/start` introduces the bot,
+`/help` shows current usage, and `/extractors` lists sites. These commands and
+`/music` appear in the Telegram command menu; groups also show `/settings`.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music
 message. AAC and MP3 tracks keep their original quality; other audio tracks
 are converted to MP3. The same file size and duration limits apply.

@@ -23,6 +23,36 @@ LOG = logging.getLogger(__name__)
 TAG_RE = re.compile(r"(?<!\w)#(skip|spoiler|nsfw)\b", re.IGNORECASE)
 
 
+def help_text(kind: str, is_admin: bool) -> str:
+    lines = [
+        "Send me a supported media link to download it (up to 2 GB). "
+        "Use /extractors to see the supported sites.",
+        "Reply to a video I sent with /music to receive its audio. "
+        "Videos without an audio track cannot be converted.",
+        "Add #skip to a link to ignore it, or #spoiler or #nsfw to hide the media.",
+    ]
+    if kind == "group":
+        lines.append(
+            "Group admins can use /settings to change captions, silent delivery, "
+            "NSFW content, album limits, enabled sites, and link deletion."
+        )
+    if is_admin:
+        lines.append("Bot admins can use /stats and /derr <id>.")
+    return "\n\n".join(lines)
+
+
+def bot_commands(group: bool) -> list[types.BotCommand]:
+    commands = [
+        types.BotCommand("start", "Introduction to PyVD"),
+        types.BotCommand("help", "How to use PyVD"),
+        types.BotCommand("extractors", "List supported sites"),
+        types.BotCommand("music", "Extract audio from a PyVD video"),
+    ]
+    if group:
+        commands.append(types.BotCommand("settings", "Configure this group"))
+    return commands
+
+
 def allowed(settings: Settings, chat_id: int | None, user_id: int | None) -> bool:
     if not settings.whitelist:
         return True
@@ -66,6 +96,13 @@ class Bot:
         self.runner = JobRunner(self.client, self.settings, self.store, self.username)
         self.inline.runner = self.runner
         self.inline.username = self.username
+        try:
+            await self.client.set_bot_commands(bot_commands(group=False))
+            await self.client.set_bot_commands(
+                bot_commands(group=True), scope=types.BotCommandScopeAllGroupChats(),
+            )
+        except Exception:
+            LOG.warning("could not update bot command menus", exc_info=True)
         LOG.info("started bot @%s", self.username)
 
     async def on_chat_member_updated(self, _: Client, update: types.ChatMemberUpdated) -> None:
@@ -83,7 +120,9 @@ class Bot:
             return
         await self.store.chat(update.chat.id, "group")
         await self.client.send_message(
-            update.chat.id, "Thanks for adding PyVD! Use /settings to configure this group."
+            update.chat.id,
+            "Thanks for adding PyVD! Send a media link to download it, use /help "
+            "for commands, or use /settings to configure this group.",
         )
 
     async def on_message(self, _: Client, message: types.Message) -> None:
@@ -107,7 +146,13 @@ class Bot:
             await message.reply(
                 "I’m PyVD. Send me a media link and I’ll download it. "
                 "Reply to one of my videos with /music to extract its audio. "
-                "Use /settings in a group to change its options."
+                "Use /help for all commands."
+            )
+            return
+        if command == "/help":
+            await message.reply(
+                help_text(kind, message.from_user.id in self.settings.admins),
+                parse_mode=enums.ParseMode.DISABLED,
             )
             return
         if command == "/extractors":
