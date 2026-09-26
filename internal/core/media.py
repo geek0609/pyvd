@@ -96,6 +96,51 @@ async def _thumbnail(item: MediaItem) -> None:
         item.thumbnail = target
 
 
+async def extract_audio(source: Path, workdir: Path, settings: Settings, title: str) -> MediaItem:
+    """Keep MP3/AAC tracks intact; convert other audio tracks to MP3."""
+    info = await _probe(source)
+    stream = next(
+        (entry for entry in info.get("streams") or [] if entry.get("codec_type") == "audio"),
+        None,
+    )
+    if stream is None:
+        raise MediaError("This video has no audio track.")
+    duration = int(float((info.get("format") or {}).get("duration") or 0))
+    if duration > settings.max_duration:
+        raise DurationTooLong("The media exceeds the duration limit.")
+    codec = stream.get("codec_name")
+    extension = ".m4a" if codec == "aac" else ".mp3"
+    output = workdir / f"audio{extension}"
+    command = [
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(source), "-map", "0:a:0", "-vn",
+    ]
+    command += ["-c:a", "copy"] if codec in {"aac", "mp3"} else [
+        "-c:a", "libmp3lame", "-q:a", "2",
+    ]
+    command += [str(output)]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise MediaError("FFmpeg and ffprobe are required to process media.") from exc
+    try:
+        await asyncio.wait_for(process.wait(), timeout=max(120, duration * 2))
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.wait()
+        raise MediaError("Audio extraction timed out.") from exc
+    if process.returncode or not output.is_file():
+        raise MediaError("Could not extract audio from this video.")
+    size = _check_size(output, settings)
+    return MediaItem(
+        kind="audio", path=output, size=size, duration=duration,
+        audio_codec="aac" if codec == "aac" else "mp3", title=title[:128],
+    )
+
+
 async def prepare(media: Media, settings: Settings) -> Media:
     if not media.items:
         raise MediaError("No media was found.")

@@ -39,6 +39,16 @@ def chat_kind(message: types.Message) -> str | None:
     return None
 
 
+def replied_video(message: types.Message | None, bot_id: int) -> types.Video | types.Document:
+    if message is None or not message.from_user or message.from_user.id != bot_id:
+        raise MediaError("Reply to a video sent by PyVD with /music.")
+    if message.video:
+        return message.video
+    if message.document and (message.document.mime_type or "").startswith("video/"):
+        return message.document
+    raise MediaError("That PyVD message does not contain a video.")
+
+
 class Bot:
     def __init__(self, client: Client, settings: Settings, store: Store):
         self.client = client
@@ -88,15 +98,50 @@ class Bot:
         if sent_at and datetime.now(timezone.utc) - sent_at > timedelta(minutes=2):
             return
         text = message.text.strip()
-        command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text.startswith("/") else ""
+        token = text.split(maxsplit=1)[0] if text.startswith("/") else ""
+        name, _, mention = token.partition("@")
+        command = name.lower() if not mention or mention.lower() == self.username.lower() else ""
+        if token and not command:
+            return
         if command == "/start":
-            await message.reply("I’m PyVD. Send me a media link and I’ll download it. Use /settings in a group to change its options.")
+            await message.reply(
+                "I’m PyVD. Send me a media link and I’ll download it. "
+                "Reply to one of my videos with /music to extract its audio. "
+                "Use /settings in a group to change its options."
+            )
             return
         if command == "/extractors":
             await message.reply("Supported sites: " + ", ".join(sorted(SITE_NAMES.values())))
             return
         if command == "/settings":
             await show_settings(self.client, self.store, message)
+            return
+        if command == "/music":
+            status = await message.reply("Queued…", parse_mode=enums.ParseMode.DISABLED)
+            try:
+                replied = message.reply_to_message
+                if replied is None and message.reply_to_message_id:
+                    replied = await self.client.get_messages(
+                        message.chat.id, message.reply_to_message_id,
+                    )
+                video = replied_video(replied, self.bot_id)
+                if self.runner is None:
+                    raise RuntimeError("bot is not started")
+                chat = await self.store.chat(message.chat.id, kind)
+                await self.runner.run_music(video, chat, message.chat.id, message.id, status)
+                await status.delete()
+            except MediaError as exc:
+                await status.edit_text(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
+            except Exception as exc:
+                LOG.exception("unexpected failure extracting audio in chat %s", message.chat.id)
+                try:
+                    error_id = await self.store.log_error(exc)
+                    await status.edit_text(
+                        f"⚠️ Audio extraction failed. Error ID: {error_id}",
+                        parse_mode=enums.ParseMode.DISABLED,
+                    )
+                except Exception:
+                    LOG.exception("could not report audio extraction failure")
             return
         if command == "/stats":
             if message.from_user.id in self.settings.admins:

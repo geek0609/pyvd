@@ -56,6 +56,9 @@ directory. Rollback means stopping `pyvd` and starting the original `bot`.
 ## Commands
 
 Send a supported link in private chat or a group. `/extractors` lists sites.
+Reply to a video sent by PyVD with `/music` to receive its audio as a music
+message. AAC and MP3 tracks keep their original quality; other audio tracks
+are converted to MP3. The same file size and duration limits apply.
 Group admins can use `/settings` for captions, silent delivery, NSFW content,
 album limits, disabled extractors, and source link deletion. Bot admins can
 use `/stats` and `/derr <id>`. Inline mode supports one media item per link.
