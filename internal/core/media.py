@@ -5,8 +5,6 @@ import json
 import logging
 from pathlib import Path
 
-from PIL import Image, ImageOps
-
 from internal.config.settings import Settings
 from internal.core.errors import DurationTooLong, FileTooLarge, MediaError
 from internal.models.media import Media, MediaItem
@@ -28,6 +26,8 @@ def _check_size(path: Path, settings: Settings) -> int:
 
 
 def _prepare_photo(item: MediaItem, settings: Settings) -> None:
+    from PIL import Image, ImageOps
+
     assert item.path is not None
     source = item.path
     _check_size(source, settings)
