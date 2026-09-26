@@ -2,10 +2,10 @@
 
 PyVD is an English-only Telegram media bot built with Hydrogram. It accepts
 links in private chats and groups, downloads with yt-dlp or gallery-dl, and
-uploads files of up to 2,000,000,000 bytes through MTProto. It recognizes the
-same ten site families as govd: Facebook, Instagram, 9GAG, Pinterest, Reddit,
-SoundCloud, Threads, TikTok, X, and YouTube. Site availability still depends
-on upstream extractors, cookies, and the source site.
+uploads files of up to 2,000,000,000 bytes through MTProto. It retains govd's
+ten site families and recognizes HTTP(S) links handled by yt-dlp's named site
+extractors. yt-dlp's Generic catch-all does not match incoming links. Site
+availability still depends on upstream extractors, cookies, and the source site.
 
 ## Configuration
 
@@ -20,11 +20,18 @@ PyVD uses the govd `private/config.yaml` site overrides and
 download job so extractors cannot rewrite the originals. The existing govd
 database is used directly; PyVD does not run migrations.
 
-For compatible H.264/AAC videos, PyVD uploads Telegram parts while it downloads
-and remuxes the source. This includes YouTube videos and Shorts with separate
-video and audio tracks, without reducing the selected quality. Telegram sends
-the message after the final part arrives. Formats that need other processing,
-albums, and posts using cookie files use the normal completed-download path.
+Additional yt-dlp sites use their lowercase extractor family as `<site>` in
+`private/cookies/<site>.txt` and `private/config.yaml`. Search `/extractors
+<name>` to see that identifier. The group settings page has one switch for
+all additional yt-dlp sites; individual sites can be disabled in
+`private/config.yaml`.
+
+For compatible H.264/AAC videos from YouTube, TikTok, X, and Facebook, PyVD
+uploads Telegram parts while it downloads and remuxes the source. This includes
+YouTube videos and Shorts with separate video and audio tracks, without reducing
+the selected quality. Telegram sends the message after the final part arrives.
+Other sites, formats that need more processing, albums, and posts using cookie
+files use the normal completed-download path.
 
 ```sh
 uv sync --locked --extra test --python 3.12
@@ -56,7 +63,7 @@ directory. Rollback means stopping `pyvd` and starting the original `bot`.
 ## Commands
 
 Send a supported link in private chat or a group. `/start` introduces the bot,
-`/help` shows current usage, and `/extractors` lists sites. These commands and
+`/help` shows current usage, and `/extractors <name>` searches sites. These commands and
 `/music` appear in the Telegram command menu; groups also show `/settings`.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music
 message. AAC and MP3 tracks keep their original quality; other audio tracks
@@ -64,3 +71,5 @@ are converted to MP3. The same file size and duration limits apply.
 Group admins can use `/settings` for captions, silent delivery, NSFW content,
 album limits, disabled extractors, and source link deletion. Bot admins can
 use `/stats` and `/derr <id>`. Inline mode supports one media item per link.
+The group NSFW switch blocks posts that yt-dlp marks as 18+; sites without that
+metadata can still pass through. `#nsfw` applies a Telegram spoiler to a post.

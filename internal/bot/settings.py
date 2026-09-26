@@ -4,14 +4,14 @@ from hydrogram import Client, enums, types
 
 from internal.config.settings import Settings
 from internal.database.store import Store
-from internal.extractors.sites import SITE_NAMES
+from internal.extractors.sites import OTHER_SITE_ID, OTHER_SITE_NAME, SITE_NAMES
 from internal.models.media import ChatSettings
 
 
 TOGGLES = {
     "captions": "Captions",
     "silent": "Silent mode",
-    "nsfw": "Allow NSFW",
+    "nsfw": "Allow marked 18+ media",
     "delete_links": "Delete source links",
 }
 LIMITS = (1, 5, 10, 15, 20)
@@ -41,12 +41,13 @@ def limit_keyboard() -> types.InlineKeyboardMarkup:
 
 
 def sites_keyboard(chat: ChatSettings, settings: Settings) -> types.InlineKeyboardMarkup:
+    names = {**SITE_NAMES, OTHER_SITE_ID: OTHER_SITE_NAME}
     buttons = [
         types.InlineKeyboardButton(
             f"{'❌' if site_id in chat.disabled_extractors else '✅'} {name}",
             callback_data=f"s:site:{site_id}",
         )
-        for site_id, name in sorted(SITE_NAMES.items(), key=lambda pair: pair[1])
+        for site_id, name in sorted(names.items(), key=lambda pair: pair[1])
         if not settings.site(site_id).disabled
     ]
     rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
@@ -97,7 +98,7 @@ async def handle_callback(
         await store.set_setting(chat_id, "media_album_limit", int(value))
         chat = await store.chat(chat_id, "group")
         action = "home"
-    elif action == "site" and value in SITE_NAMES:
+    elif action == "site" and value in {*SITE_NAMES, OTHER_SITE_ID}:
         await store.set_extractor_enabled(chat_id, value, value in chat.disabled_extractors)
         chat = await store.chat(chat_id, "group")
         action = "sites"

@@ -15,6 +15,7 @@ def test_settings_keyboard_uses_saved_values() -> None:
     assert rows[4][0].text == "Album limit: 10"
     site_rows = sites_keyboard(chat, SimpleNamespace(site=lambda _: SimpleNamespace(disabled=False))).inline_keyboard
     assert any("❌ YouTube" == button.text for row in site_rows for button in row)
+    assert any("✅ Other yt-dlp sites" == button.text for row in site_rows for button in row)
 
 
 @pytest.mark.asyncio

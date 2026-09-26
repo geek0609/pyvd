@@ -14,7 +14,7 @@ from internal.bot.inline import Inline
 from internal.core.errors import MediaError
 from internal.core.tasks import JobRunner
 from internal.database.store import Store
-from internal.extractors.sites import SITE_NAMES, first_supported_url
+from internal.extractors.sites import SITE_NAMES, first_supported_url, search_extractors
 from internal.logger.main import configure_logging
 from internal.networking.proxy import hydrogram_proxy
 
@@ -26,7 +26,7 @@ TAG_RE = re.compile(r"(?<!\w)#(skip|spoiler|nsfw)\b", re.IGNORECASE)
 def help_text(kind: str, is_admin: bool) -> str:
     lines = [
         "Send me a supported media link to download it (up to 2 GB). "
-        "Use /extractors to see the supported sites.",
+        "Use /extractors <name> to search supported sites.",
         "Reply to a video I sent with /music to receive its audio. "
         "Videos without an audio track cannot be converted.",
         "Add #skip to a link to ignore it, or #spoiler or #nsfw to hide the media.",
@@ -34,7 +34,7 @@ def help_text(kind: str, is_admin: bool) -> str:
     if kind == "group":
         lines.append(
             "Group admins can use /settings to change captions, silent delivery, "
-            "NSFW content, album limits, enabled sites, and link deletion."
+            "marked 18+ media, album limits, enabled sites, and link deletion."
         )
     if is_admin:
         lines.append("Bot admins can use /stats and /derr <id>.")
@@ -45,7 +45,7 @@ def bot_commands(group: bool) -> list[types.BotCommand]:
     commands = [
         types.BotCommand("start", "Introduction to PyVD"),
         types.BotCommand("help", "How to use PyVD"),
-        types.BotCommand("extractors", "List supported sites"),
+        types.BotCommand("extractors", "Search supported sites"),
         types.BotCommand("music", "Extract audio from a PyVD video"),
     ]
     if group:
@@ -156,7 +156,22 @@ class Bot:
             )
             return
         if command == "/extractors":
-            await message.reply("Supported sites: " + ", ".join(sorted(SITE_NAMES.values())))
+            term = text.partition(" ")[2].strip()
+            if term:
+                matches, total = search_extractors(term)
+                lines = [f"{name} ({site_id})" for site_id, name in matches]
+                result = "\n".join(lines) if lines else "No matching extractor."
+                if total > len(matches):
+                    result += f"\nShowing {len(matches)} of {total} matches."
+                await message.reply(result, parse_mode=enums.ParseMode.DISABLED)
+            else:
+                await message.reply(
+                    "PyVD supports " + ", ".join(sorted(SITE_NAMES.values()))
+                    + ", plus yt-dlp's named site extractors. "
+                    "Use /extractors <name> to search them. "
+                    "Full list: https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md",
+                    parse_mode=enums.ParseMode.DISABLED,
+                )
             return
         if command == "/settings":
             await show_settings(self.client, self.store, message)
