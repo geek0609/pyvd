@@ -35,7 +35,7 @@ def test_downloaded_file_is_turned_into_media(tmp_path: Path, monkeypatch: pytes
             path.write_bytes(b"video")
             return {"title": "A video", "requested_downloads": [{"filepath": str(path)}], "duration": 10}
 
-    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYDL)
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYDL)
     media = downloader._download(Request("youtube", "video", "https://youtu.be/video"), _settings(tmp_path), tmp_path)
     assert media.items[0].path == tmp_path / "001-video.mp4"
     assert media.items[0].kind == "video"
@@ -57,6 +57,6 @@ def test_progress_stops_oversized_file(tmp_path: Path, monkeypatch: pytest.Monke
         def extract_info(self, url, download):
             self.opts["progress_hooks"][0]({"status": "downloading", "downloaded_bytes": 101})
 
-    monkeypatch.setattr(downloader.yt_dlp, "YoutubeDL", FakeYDL)
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYDL)
     with pytest.raises(FileTooLarge):
         downloader._download(Request("youtube", "video", "https://youtu.be/video"), _settings(tmp_path), tmp_path)

@@ -5,8 +5,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import yt_dlp
-
 from internal.config.settings import Settings
 from internal.core.errors import DurationTooLong, FileTooLarge, MediaError, NoMedia
 from internal.extractors.cookies import job_cookie_file
@@ -75,6 +73,8 @@ def _kind(path: Path, site: str, entry: dict[str, Any]) -> str:
 
 
 def _download(request: Request, settings: Settings, workdir: Path) -> Media:
+    import yt_dlp
+
     site = settings.site(request.extractor_id)
     cookie = job_cookie_file(settings, request.extractor_id, workdir)
 
@@ -162,10 +162,18 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
     return media
 
 
+def _download_in_process(request: Request, settings: Settings, workdir: Path) -> Media:
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as pool:
+        return pool.submit(_download, request, settings, workdir).result()
+
+
 async def download(request: Request, settings: Settings, workdir: Path) -> Media:
     if prefer_gallery(request):
         try:
             return await download_gallery(request, settings, workdir)
         except NoMedia:
             LOG.info("gallery extraction unavailable for %s; trying yt-dlp", request.extractor_id)
-    return await asyncio.to_thread(_download, request, settings, workdir)
+    return await asyncio.to_thread(_download_in_process, request, settings, workdir)
