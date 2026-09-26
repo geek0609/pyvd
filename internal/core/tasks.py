@@ -16,6 +16,7 @@ from internal.core.send import Sender, format_caption
 from internal.database.store import Store
 from internal.extractors.downloader import download
 from internal.extractors.sites import Request
+from internal.extractors.stream import try_stream_upload
 from internal.models.media import ChatSettings, Media
 
 
@@ -106,6 +107,31 @@ class JobRunner:
             self.settings.downloads_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="pyvd-", dir=self.settings.downloads_dir) as directory:
                 workdir = Path(directory)
+                streamed = await try_stream_upload(self.client, request, self.settings, workdir, status)
+                if streamed:
+                    media = streamed.media
+                    if chat.kind == "group" and media.nsfw and not chat.nsfw:
+                        raise MediaError("NSFW media is disabled in this group.")
+                    await self._status(status, "Preparing media…")
+                    try:
+                        media = await prepare(media, self.settings)
+                    except MediaError:
+                        LOG.warning("streamed media could not be prepared for %s", request.key)
+                    else:
+                        if media.items[0].delivery_kind == "video":
+                            await self._status(status, "Sending media…")
+                            message = await self.sender.send_preuploaded_video(
+                                target_chat_id, media.items[0], streamed.file,
+                                format_caption(media, chat, self.settings, self.username),
+                                reply_to, chat.silent, spoiler,
+                            )
+                            if self.settings.caching:
+                                try:
+                                    await self.store.save_media(media)
+                                except Exception:
+                                    LOG.exception("could not cache uploaded media for %s", request.key)
+                            return Delivery(media, [message])
+                    (workdir / "streamed.mp4").unlink(missing_ok=True)
                 media = await download(request, self.settings, workdir)
                 if inline and len(media.items) != 1:
                     raise MediaError("Inline mode supports one media item per link.")

@@ -14,6 +14,12 @@ from internal.models.media import Media, MediaItem
 
 
 LOG = logging.getLogger(__name__)
+DEFAULT_FORMAT = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best"
+YOUTUBE_FORMAT = (
+    "bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/"
+    "b[ext=mp4][vcodec^=avc1]/"
+    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best"
+)
 
 
 class _YtdlpLogger:
@@ -93,7 +99,7 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
 
     options: dict[str, Any] = {
         "outtmpl": str(workdir / "%(autonumber)03d-%(id).80B.%(ext)s"),
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best",
+        "format": DEFAULT_FORMAT,
         "merge_output_format": "mp4",
         "noplaylist": True,
         "playlistend": 21,
@@ -107,11 +113,7 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
         "ignoreerrors": False,
     }
     if request.extractor_id == "youtube":
-        options["format"] = (
-            "bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/"
-            "b[ext=mp4][vcodec^=avc1]/"
-            "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best"
-        )
+        options["format"] = YOUTUBE_FORMAT
         options["js_runtimes"] = {"deno": {}, "node": {}}
     if cookie:
         options["cookiefile"] = str(cookie)

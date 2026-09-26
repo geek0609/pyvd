@@ -3,7 +3,8 @@
 import html
 import time
 
-from hydrogram import Client, enums, types
+from hydrogram import Client, enums, raw, types, utils
+from hydrogram.errors import FilePartMissing
 
 from internal.config.settings import Settings
 from internal.core.errors import FileTooLarge, MediaError
@@ -81,6 +82,52 @@ class Sender:
     def __init__(self, client: Client, settings: Settings):
         self.client = client
         self.settings = settings
+
+    async def send_preuploaded_video(
+        self, chat_id: int, item: MediaItem, file: raw.types.InputFileBig,
+        caption: str, reply_to: int | None, silent: bool, spoiler: bool,
+    ) -> types.Message:
+        if item.path is None or not item.path.is_file():
+            raise MediaError("A streamed video is missing before delivery.")
+        thumbnail = await self.client.save_file(str(item.thumbnail)) if item.thumbnail else None
+        media = raw.types.InputMediaUploadedDocument(
+            file=file, mime_type="video/mp4", thumb=thumbnail, spoiler=spoiler or None,
+            attributes=[
+                raw.types.DocumentAttributeVideo(
+                    supports_streaming=True, duration=item.duration,
+                    w=item.width, h=item.height,
+                ),
+                raw.types.DocumentAttributeFilename(file_name=item.path.name),
+            ],
+        )
+        while True:
+            try:
+                result = await self.client.invoke(raw.functions.messages.SendMedia(
+                    peer=await self.client.resolve_peer(chat_id), media=media,
+                    silent=silent or None,
+                    reply_to=utils.get_reply_head_fm(None, reply_to),
+                    random_id=self.client.rnd_id(),
+                    **await utils.parse_text_entities(
+                        self.client, caption, enums.ParseMode.HTML, None,
+                    ),
+                ))
+            except FilePartMissing as exc:
+                await self.client.save_file(str(item.path), file_id=file.id, file_part=exc.value)
+                continue
+            for update in result.updates:
+                if isinstance(update, (
+                    raw.types.UpdateNewMessage, raw.types.UpdateNewChannelMessage,
+                    raw.types.UpdateNewScheduledMessage,
+                )):
+                    sent = await types.Message._parse(
+                        client=self.client, message=update.message,
+                        users={user.id: user for user in result.users},
+                        chats={chat.id: chat for chat in result.chats},
+                        is_scheduled=isinstance(update, raw.types.UpdateNewScheduledMessage),
+                    )
+                    item.file_id = message_file_id(sent)
+                    return sent
+            raise MediaError("Telegram did not confirm the streamed video.")
 
     async def _single(
         self, chat_id: int, item: MediaItem, caption: str, reply_to: int | None,

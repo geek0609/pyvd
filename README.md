@@ -20,6 +20,12 @@ PyVD uses the govd `private/config.yaml` site overrides and
 download job so extractors cannot rewrite the originals. The existing govd
 database is used directly; PyVD does not run migrations.
 
+For compatible H.264/AAC videos, PyVD uploads Telegram parts while it downloads
+and remuxes the source. This includes YouTube videos and Shorts with separate
+video and audio tracks, without reducing the selected quality. Telegram sends
+the message after the final part arrives. Formats that need other processing,
+albums, and posts using cookie files use the normal completed-download path.
+
 ```sh
 uv sync --locked --extra test --python 3.12
 .venv/bin/python cmd/main.py --check
