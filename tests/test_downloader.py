@@ -60,3 +60,35 @@ def test_progress_stops_oversized_file(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYDL)
     with pytest.raises(FileTooLarge):
         downloader._download(Request("youtube", "video", "https://youtu.be/video"), _settings(tmp_path), tmp_path)
+
+
+def test_additional_site_uses_its_own_cookie_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cookies = tmp_path / "private" / "cookies"
+    cookies.mkdir(parents=True)
+    original = cookies / "vimeo.txt"
+    original.write_text("# Netscape HTTP Cookie File\n")
+    captured = {}
+
+    class FakeYDL:
+        def __init__(self, opts):
+            captured.update(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def extract_info(self, url, download):
+            path = tmp_path / "001-video.mp4"
+            path.write_bytes(b"video")
+            return {"requested_downloads": [{"filepath": str(path)}]}
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYDL)
+    settings = _settings(tmp_path)
+    settings.cookie_path = lambda site_id: cookies / f"{site_id}.txt"
+    downloader._download(
+        Request("vimeo", "hash", "https://vimeo.com/123456"), settings, tmp_path,
+    )
+    assert Path(captured["cookiefile"]).read_bytes() == original.read_bytes()
+    assert Path(captured["cookiefile"]) != original

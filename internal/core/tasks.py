@@ -16,7 +16,7 @@ from internal.core.media import extract_audio, prepare
 from internal.core.send import Sender, format_caption
 from internal.database.store import Store
 from internal.extractors.downloader import download
-from internal.extractors.sites import Request
+from internal.extractors.sites import OTHER_SITE_ID, SITE_NAMES, Request
 from internal.extractors.stream import try_stream_upload
 from internal.models.media import ChatSettings, Media
 
@@ -127,7 +127,10 @@ class JobRunner:
         status: types.Message | None = None, inline: bool = False,
     ) -> Delivery:
         site = self.settings.site(request.extractor_id)
-        if site.disabled or request.extractor_id in chat.disabled_extractors:
+        other_disabled = request.extractor_id not in SITE_NAMES and (
+            OTHER_SITE_ID in chat.disabled_extractors or self.settings.site(OTHER_SITE_ID).disabled
+        )
+        if site.disabled or request.extractor_id in chat.disabled_extractors or other_disabled:
             raise MediaError("This site is disabled in this chat.")
         if any(pattern.search(request.url) for pattern in site.ignore_regex):
             raise MediaError("This link is ignored by the site configuration.")

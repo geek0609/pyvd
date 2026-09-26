@@ -11,7 +11,7 @@ from internal.config.settings import Settings
 from internal.core.send import Sender, format_caption, input_media
 from internal.core.tasks import JobRunner, stale_youtube_cache
 from internal.database.store import Store
-from internal.extractors.sites import Request, first_supported_url
+from internal.extractors.sites import OTHER_SITE_ID, SITE_NAMES, Request, first_supported_url
 
 
 LOG = logging.getLogger(__name__)
@@ -55,8 +55,13 @@ class Inline:
         if request is None or self.settings.site(request.extractor_id).disabled:
             await query.answer([], cache_time=0, is_personal=True)
             return
+        if request.extractor_id not in SITE_NAMES and self.settings.site(OTHER_SITE_ID).disabled:
+            await query.answer([], cache_time=0, is_personal=True)
+            return
         chat = await self.store.chat(query.from_user.id, "private")
-        if request.extractor_id in chat.disabled_extractors:
+        if request.extractor_id in chat.disabled_extractors or (
+            request.extractor_id not in SITE_NAMES and OTHER_SITE_ID in chat.disabled_extractors
+        ):
             await query.answer([], cache_time=0, is_personal=True)
             return
         task_id = self.add(query.from_user.id, request)
