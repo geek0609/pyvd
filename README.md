@@ -25,6 +25,19 @@ Additional yt-dlp sites use their lowercase extractor family as `<site>` in
 <name>` to see that identifier. Site availability is set in
 `private/config.yaml`; groups do not have per-site switches.
 
+## BotFather setup
+
+For inline links, use `/setinline` in BotFather to enable inline mode for the
+bot, then use `/setinlinefeedback` and choose **100%**. PyVD replaces the
+selected inline result with media after Telegram sends the chosen-result
+update; a lower feedback rate leaves some results at "Preparing media…".
+Leave `/setinlinegeo` disabled because PyVD does not use location.
+
+For automatic links in groups, disable group Privacy Mode with `/setprivacy`
+and keep `/setjoingroups` enabled. Telegram then delivers ordinary group
+messages to the bot. A bot made group admin receives all group messages even
+with Privacy Mode enabled; grant admin rights only if link deletion is needed.
+
 For compatible H.264/AAC videos from YouTube, TikTok, X, and Facebook, PyVD
 uploads Telegram parts while it downloads and remuxes the source. This includes
 YouTube videos and Shorts with separate video and audio tracks, without reducing
@@ -62,10 +75,10 @@ original `bot`.
 
 ## Commands
 
-Send a supported link in private chat. In a group, use `/download <link>` so
-Telegram group privacy can stay enabled. `/start` introduces the bot, `/help`
-shows current usage, and `/extractors <name>` searches sites. These commands
-and `/music` appear in the Telegram command menu; groups also show `/settings`.
+Send a supported link in a private chat or group. `/start` introduces the bot,
+`/help` shows current usage, and `/extractors <name>` searches sites. These
+commands and `/music` appear in the Telegram command menu; groups also show
+`/settings`.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music
 message. AAC and MP3 tracks keep their original quality; other audio tracks
 are converted to MP3. The same file size and duration limits apply.
