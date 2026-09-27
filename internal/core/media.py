@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 from pathlib import Path
 
 from internal.config.settings import Settings
@@ -10,7 +9,6 @@ from internal.core.errors import DurationTooLong, FileTooLarge, MediaError
 from internal.models.media import Media, MediaItem
 
 
-LOG = logging.getLogger(__name__)
 CODECS = {
     "h264": "avc", "hevc": "hevc", "h265": "hevc", "vp9": "vp9",
     "vp8": "vp8", "av1": "av1", "aac": "aac", "mp3": "mp3",
@@ -90,7 +88,6 @@ async def _thumbnail(item: MediaItem) -> None:
         )
         await asyncio.wait_for(process.wait(), timeout=60)
     except (FileNotFoundError, asyncio.TimeoutError):
-        LOG.debug("thumbnail extraction unavailable for %s", item.path)
         return
     if process.returncode == 0 and target.is_file() and target.stat().st_size < 200_000:
         item.thumbnail = target

@@ -9,5 +9,3 @@ __pycache__/
 .ruff_cache/
 downloads/*
 !downloads/.gitkeep
-logs/*
-!logs/.gitkeep

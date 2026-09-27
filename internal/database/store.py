@@ -1,8 +1,5 @@
 """Read and write govd's existing PostgreSQL schema."""
 
-import hashlib
-from datetime import datetime
-
 import asyncpg
 
 from internal.config.settings import Settings
@@ -39,6 +36,15 @@ class Store:
     async def chat(self, chat_id: int, kind: str) -> ChatSettings:
         if kind not in {"private", "group"}:
             raise ValueError("invalid chat type")
+        if kind == "private":
+            return ChatSettings(
+                chat_id=chat_id, kind=kind,
+                captions=self.settings.default_captions,
+                silent=self.settings.default_silent,
+                nsfw=self.settings.default_nsfw,
+                media_album_limit=self.settings.default_media_album_limit,
+                delete_links=self.settings.default_delete_links,
+            )
         async with self._pool().acquire() as db, db.transaction():
             await db.execute(
                 "INSERT INTO chat (chat_id, type) VALUES ($1, $2::chat_type) "
@@ -58,7 +64,7 @@ class Store:
             )
             row = await db.fetchrow(
                 "SELECT c.chat_id, c.type::text AS kind, s.captions, s.silent, s.nsfw, "
-                "s.media_album_limit, s.delete_links, s.disabled_extractors "
+                "s.media_album_limit, s.delete_links "
                 "FROM chat c JOIN settings s ON s.chat_id = c.chat_id WHERE c.chat_id = $1",
                 chat_id,
             )
@@ -67,7 +73,6 @@ class Store:
             silent=row["silent"], nsfw=row["nsfw"],
             media_album_limit=row["media_album_limit"],
             delete_links=row["delete_links"],
-            disabled_extractors=tuple(row["disabled_extractors"]),
         )
 
     async def set_setting(self, chat_id: int, name: str, value: bool | int) -> None:
@@ -83,16 +88,6 @@ class Store:
             f"UPDATE settings SET {name} = $2, updated_at = NOW() WHERE chat_id = $1",
             chat_id, value,
         )
-
-    async def set_extractor_enabled(self, chat_id: int, extractor_id: str, enabled: bool) -> None:
-        if enabled:
-            sql = "UPDATE settings SET disabled_extractors = array_remove(disabled_extractors, $2), updated_at = NOW() WHERE chat_id = $1"
-        else:
-            sql = (
-                "UPDATE settings SET disabled_extractors = array_append(disabled_extractors, $2), "
-                "updated_at = NOW() WHERE chat_id = $1 AND NOT ($2 = ANY(disabled_extractors))"
-            )
-        await self._pool().execute(sql, chat_id, extractor_id)
 
     async def cached_media(self, extractor_id: str, content_id: str) -> Media | None:
         async with self._pool().acquire() as db:
@@ -139,7 +134,7 @@ class Store:
                 "ON CONFLICT (content_id, extractor_id) DO UPDATE SET "
                 "content_url = EXCLUDED.content_url, caption = EXCLUDED.caption, "
                 "nsfw = EXCLUDED.nsfw, updated_at = NOW() RETURNING id",
-                media.content_id, media.url, media.extractor_id, media.caption or None, media.nsfw,
+                media.content_id, "", media.extractor_id, media.caption or None, media.nsfw,
             )
             await db.execute("DELETE FROM media_item WHERE media_id = $1", media_id)
             for item in media.items:
@@ -157,29 +152,3 @@ class Store:
                     item.artist or None, item.width or None, item.height or None,
                     item.bitrate or None,
                 )
-
-    async def stats(self, since: datetime) -> dict[str, int]:
-        row = await self._pool().fetchrow(
-            "SELECT "
-            "(SELECT count(*) FROM chat WHERE type = 'private' AND created_at >= $1) AS private_chats, "
-            "(SELECT count(*) FROM chat WHERE type = 'group' AND created_at >= $1) AS group_chats, "
-            "(SELECT count(*) FROM media_format f JOIN media_item i ON i.id = f.item_id "
-            "JOIN media m ON m.id = i.media_id WHERE m.created_at >= $1) AS downloads, "
-            "(SELECT coalesce(sum(f.file_size), 0) FROM media_format f JOIN media_item i ON i.id = f.item_id "
-            "JOIN media m ON m.id = i.media_id WHERE m.created_at >= $1) AS bytes",
-            since,
-        )
-        return dict(row)
-
-    async def log_error(self, error: Exception) -> str:
-        message = f"{type(error).__name__}: {error}"
-        error_id = hashlib.sha256(message.encode()).hexdigest()[:8]
-        await self._pool().execute(
-            "INSERT INTO errors (id, message) VALUES ($1, $2) "
-            "ON CONFLICT (id) DO UPDATE SET occurrences = errors.occurrences + 1, last_seen = NOW()",
-            error_id, message,
-        )
-        return error_id
-
-    async def error(self, error_id: str) -> str | None:
-        return await self._pool().fetchval("SELECT message FROM errors WHERE id = $1", error_id)

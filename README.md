@@ -22,9 +22,8 @@ database is used directly; PyVD does not run migrations.
 
 Additional yt-dlp sites use their lowercase extractor family as `<site>` in
 `private/cookies/<site>.txt` and `private/config.yaml`. Search `/extractors
-<name>` to see that identifier. The group settings page has one switch for
-all additional yt-dlp sites; individual sites can be disabled in
-`private/config.yaml`.
+<name>` to see that identifier. Site availability is set in
+`private/config.yaml`; groups do not have per-site switches.
 
 For compatible H.264/AAC videos from YouTube, TikTok, X, and Facebook, PyVD
 uploads Telegram parts while it downloads and remuxes the source. This includes
@@ -57,19 +56,34 @@ From the PyVD directory on the host, with `.env` populated, run
 `docker compose build` and `docker compose run --rm pyvd python cmd/main.py --check`
 to validate the image and configuration. Stop the old `bot` before
 `docker compose up -d` so one process consumes updates for the shared token.
-The new service is named `pyvd`; its downloads and logs remain under this
-directory. Rollback means stopping `pyvd` and starting the original `bot`.
+The new service is named `pyvd`. Job files are removed when each job ends, and
+container logging is disabled. Rollback means stopping `pyvd` and starting the
+original `bot`.
 
 ## Commands
 
-Send a supported link in private chat or a group. `/start` introduces the bot,
-`/help` shows current usage, and `/extractors <name>` searches sites. These commands and
-`/music` appear in the Telegram command menu; groups also show `/settings`.
+Send a supported link in private chat. In a group, use `/download <link>` so
+Telegram group privacy can stay enabled. `/start` introduces the bot, `/help`
+shows current usage, and `/extractors <name>` searches sites. These commands
+and `/music` appear in the Telegram command menu; groups also show `/settings`.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music
 message. AAC and MP3 tracks keep their original quality; other audio tracks
 are converted to MP3. The same file size and duration limits apply.
-Group admins can use `/settings` for captions, silent delivery, NSFW content,
-album limits, disabled extractors, and source link deletion. Bot admins can
-use `/stats` and `/derr <id>`. Inline mode supports one media item per link.
-The group NSFW switch blocks posts that yt-dlp marks as 18+; sites without that
-metadata can still pass through. `#nsfw` applies a Telegram spoiler to a post.
+Group admins can use `/settings` for captions, silent delivery, marked media,
+album limits, and source link deletion. Inline mode supports one media item per
+link. The group NSFW switch blocks media marked by source metadata or `#nsfw`
+when disabled. When enabled, marked media is sent with a spoiler in public
+groups and without an automatic spoiler in private groups. Use `#spoiler` to
+request a spoiler separately. Sources without markers can still pass through.
+Public supergroups with a username have a fixed allowlist: the original ten
+sites plus PBS Kids, LEGO, Nickelodeon, KiKA, and TOGGO. Only their direct
+domains are accepted. General shorteners, including t.co, are blocked. Group
+inline queries only offer allowlisted domains. Marked media is not delivered
+through group inline mode because Telegram does not identify the target group
+or expose its NSFW setting to the bot.
+
+The reusable Telegram media cache is keyed by extractor and video ID, or a
+digest of the source URL where the extractor has no usable ID. It contains no
+downloader or chat ID, and source URLs are not stored in the cache. Private
+chats use in-memory defaults rather than saved settings; only group settings
+remain in the database. The bot does not keep error records or application logs.

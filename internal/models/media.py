@@ -51,4 +51,3 @@ class ChatSettings:
     nsfw: bool
     media_album_limit: int
     delete_links: bool
-    disabled_extractors: tuple[str, ...] = ()

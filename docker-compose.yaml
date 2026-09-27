@@ -8,7 +8,8 @@ services:
     volumes:
       - ${GOVD_PRIVATE_DIR:-../govd/private}:/app/private:ro
       - ./downloads:/app/downloads
-      - ./logs:/app/logs
+    logging:
+      driver: none
     networks:
       - govd-network
       - proxy_net

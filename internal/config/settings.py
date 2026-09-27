@@ -95,7 +95,6 @@ class Settings:
     default_delete_links: bool
     captions_header: str
     captions_description: str
-    log_level: str
     metrics_port: int
     site_configs: dict[str, SiteConfig] = field(default_factory=dict)
 
@@ -168,7 +167,6 @@ def load_settings(root: Path | None = None) -> Settings:
         default_delete_links=_bool(get("DEFAULT_DELETE_LINKS")),
         captions_header=get("CAPTIONS_HEADER", "<a href='{{url}}'>source</a> - @{{username}}"),
         captions_description=get("CAPTIONS_DESCRIPTION", "<blockquote expandable>{{text}}</blockquote>"),
-        log_level=get("LOG_LEVEL", "info").upper(),
         metrics_port=int(get("METRICS_PORT", "0")),
         site_configs=site_configs,
     )

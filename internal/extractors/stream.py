@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 import os
 import signal
 import sys
@@ -20,7 +19,6 @@ from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
 
 
-LOG = logging.getLogger(__name__)
 PART_SIZE = 512 * 1024
 STREAM_SITES = frozenset({"youtube", "tiktok", "twitter", "facebook"})
 
@@ -144,8 +142,7 @@ async def try_stream_upload(
         return UploadedVideo(media, handle)
     except FileTooLarge:
         raise
-    except Exception as exc:
-        LOG.warning("streamed upload unavailable for %s: %s", request.key, type(exc).__name__)
+    except Exception:
         (workdir / "streamed.mp4").unlink(missing_ok=True)
         return None
     finally:
