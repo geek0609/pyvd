@@ -96,6 +96,42 @@ async def test_public_group_music_rejects_spoilered_video() -> None:
 
 
 @pytest.mark.asyncio
+async def test_group_music_rejects_cached_nsfw_video_when_disabled() -> None:
+    replies = []
+
+    class Status:
+        async def edit_text(self, text, **kwargs):
+            replies.append(text)
+
+    class Message:
+        text = "/music"
+        date = datetime.now(timezone.utc)
+        chat = SimpleNamespace(id=-100, type=enums.ChatType.SUPERGROUP, username=None)
+        from_user = SimpleNamespace(id=7)
+        reply_to_message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42), video=SimpleNamespace(file_id="video"),
+        )
+        id = 6
+
+        async def reply(self, text, **kwargs):
+            return Status()
+
+    class Store:
+        async def chat(self, chat_id, kind):
+            return ChatSettings(chat_id, kind, True, False, False, 10, False)
+
+        async def is_nsfw_file(self, file_id):
+            assert file_id == "video"
+            return True
+
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
+    bot.bot_id = 42
+    bot.runner = SimpleNamespace()
+    await bot.on_message(None, Message())
+    assert replies == ["⚠️ Marked media is disabled in this group."]
+
+
+@pytest.mark.asyncio
 async def test_music_rejects_oversize_video_before_download(tmp_path: Path) -> None:
     settings = SimpleNamespace(max_file_size=100, max_duration=3600, downloads_dir=tmp_path)
     runner = JobRunner(SimpleNamespace(), settings, SimpleNamespace(), "pyvd")

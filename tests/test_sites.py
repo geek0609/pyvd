@@ -140,7 +140,7 @@ def test_marked_media_requires_group_permission_and_public_spoiler() -> None:
         delivery_spoiler(video, ChatSettings(123, "private", True, False, True, 10, False), True, False)
 
 
-def test_tagged_media_obeys_group_setting_without_poisoning_cache() -> None:
+def test_tagged_media_obeys_group_setting() -> None:
     video = Media(
         "youtube", "id", "https://youtu.be/YE7VzlLtp-4",
         items=[MediaItem(kind="video", file_id="cached", video_codec="avc")],
@@ -195,3 +195,37 @@ async def test_cached_marked_video_is_sent_with_spoiler_in_public_group() -> Non
         public_group=True,
     )
     assert result.media is media
+
+
+@pytest.mark.asyncio
+async def test_user_nsfw_marker_is_kept_with_cached_video_id() -> None:
+    media = Media(
+        "youtube", "id", "", items=[MediaItem(kind="video", file_id="cached", video_codec="avc")],
+    )
+    marked = []
+
+    class Store:
+        async def cached_media(self, extractor_id, content_id):
+            return media
+
+        async def mark_media_nsfw(self, extractor_id, content_id):
+            marked.append((extractor_id, content_id))
+
+    class Sender:
+        async def send(self, chat_id, sent_media, caption, **kwargs):
+            assert kwargs["spoiler"] is True
+            return []
+
+    settings = SimpleNamespace(
+        caching=True, captions_header="", captions_description="",
+        site=lambda _: SimpleNamespace(disabled=False, ignore_regex=()),
+    )
+    runner = JobRunner(SimpleNamespace(), settings, Store(), "pyvd")
+    runner.sender = Sender()
+    chat = ChatSettings(-100, "group", False, False, True, 10, False)
+    await runner.run(
+        Request("youtube", "id", "https://youtu.be/YE7VzlLtp-4"), chat, -100,
+        public_group=True, marked_nsfw=True,
+    )
+    assert marked == [("youtube", "id")]
+    assert media.nsfw

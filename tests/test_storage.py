@@ -63,6 +63,22 @@ async def test_cache_rejects_missing_file_ids() -> None:
 
 
 @pytest.mark.asyncio
+async def test_nsfw_lookup_uses_cached_telegram_file_id() -> None:
+    calls = []
+
+    class Db:
+        async def fetchval(self, query, *args):
+            calls.append((query, args))
+            return True
+
+    store = Store.__new__(Store)
+    store.pool = Db()
+    assert await store.is_nsfw_file("telegram-id")
+    assert "f.file_id = $1 AND m.nsfw" in calls[0][0]
+    assert calls[0][1] == ("telegram-id",)
+
+
+@pytest.mark.asyncio
 async def test_invalid_setting_cannot_reach_sql() -> None:
     store = Store.__new__(Store)
     with pytest.raises(ValueError):

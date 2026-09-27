@@ -169,6 +169,9 @@ class JobRunner:
             if cached and stale_youtube_cache(cached):
                 cached = None
             if cached and (not inline or len(cached.items) == 1):
+                if marked_nsfw and not cached.nsfw:
+                    await self.store.mark_media_nsfw(request.extractor_id, request.content_id)
+                    cached.nsfw = True
                 cached.url = request.url
                 if chat.kind == "group" and len(cached.items) > chat.media_album_limit:
                     raise MediaError("This post exceeds this group's album limit.")
@@ -196,6 +199,7 @@ class JobRunner:
                 streamed = await try_stream_upload(self.client, request, self.settings, workdir, status)
                 if streamed:
                     media = streamed.media
+                    media.nsfw = media.nsfw or marked_nsfw
                     check_group_nsfw(media, chat, public_group, marked_nsfw)
                     await self._status(status, "Preparing media…")
                     try:
@@ -221,6 +225,7 @@ class JobRunner:
                             return Delivery(media, [message])
                     (workdir / "streamed.mp4").unlink(missing_ok=True)
                 media = await download(request, self.settings, workdir)
+                media.nsfw = media.nsfw or marked_nsfw
                 if inline and len(media.items) != 1:
                     raise MediaError("Inline mode supports one media item per link.")
                 if chat.kind == "group" and len(media.items) > chat.media_album_limit:

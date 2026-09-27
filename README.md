@@ -75,6 +75,9 @@ link. The group NSFW switch blocks media marked by source metadata or `#nsfw`
 when disabled. When enabled, marked media is sent with a spoiler in public
 groups and without an automatic spoiler in private groups. Use `#spoiler` to
 request a spoiler separately. Sources without markers can still pass through.
+NSFW markers on cached videos are retained by video ID. `/music` rejects known
+marked videos when the group disallows them, and blocks their audio in public
+groups because Telegram cannot hide audio with a spoiler.
 Public supergroups with a username have a fixed allowlist: the original ten
 sites plus PBS Kids, LEGO, Nickelodeon, KiKA, and TOGGO. Only their direct
 domains are accepted. General shorteners, including t.co, are blocked. Group

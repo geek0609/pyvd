@@ -124,6 +124,22 @@ class Store:
             nsfw=row["nsfw"], items=items,
         )
 
+    async def mark_media_nsfw(self, extractor_id: str, content_id: str) -> None:
+        await self._pool().execute(
+            "UPDATE media SET nsfw = TRUE, updated_at = NOW() "
+            "WHERE extractor_id = $1 AND content_id = $2",
+            extractor_id, content_id,
+        )
+
+    async def is_nsfw_file(self, file_id: str) -> bool:
+        return bool(await self._pool().fetchval(
+            "SELECT EXISTS (SELECT 1 FROM media_format f "
+            "JOIN media_item i ON i.id = f.item_id "
+            "JOIN media m ON m.id = i.media_id "
+            "WHERE f.file_id = $1 AND m.nsfw)",
+            file_id,
+        ))
+
     async def save_media(self, media: Media) -> None:
         if not media.items or any(not item.file_id for item in media.items):
             raise ValueError("cannot cache media without Telegram file IDs")

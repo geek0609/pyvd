@@ -214,6 +214,14 @@ class Bot:
                 if self.runner is None:
                     raise RuntimeError("bot is not started")
                 chat = await self.store.chat(message.chat.id, kind)
+                if kind == "group" and await self.store.is_nsfw_file(video.file_id):
+                    if not chat.nsfw:
+                        raise MediaError("Marked media is disabled in this group.")
+                    if public_group:
+                        raise MediaError(
+                            "Audio from marked videos is unavailable here. "
+                            "Use a DM or private group."
+                        )
                 await self.runner.run_music(video, chat, message.chat.id, message.id, status)
                 await status.delete()
             except MediaError as exc:
