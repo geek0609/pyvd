@@ -2,16 +2,14 @@
 
 from hydrogram import Client, enums, types
 
-from internal.config.settings import Settings
 from internal.database.store import Store
-from internal.extractors.sites import OTHER_SITE_ID, OTHER_SITE_NAME, SITE_NAMES
 from internal.models.media import ChatSettings
 
 
 TOGGLES = {
     "captions": "Captions",
     "silent": "Silent mode",
-    "nsfw": "Allow marked 18+ media",
+    "nsfw": "Allow age-restricted media",
     "delete_links": "Delete source links",
 }
 LIMITS = (1, 5, 10, 15, 20)
@@ -28,7 +26,6 @@ def keyboard(chat: ChatSettings) -> types.InlineKeyboardMarkup:
     rows.append([types.InlineKeyboardButton(
         f"Album limit: {chat.media_album_limit}", callback_data="s:limits",
     )])
-    rows.append([types.InlineKeyboardButton("Supported sites", callback_data="s:sites")])
     rows.append([types.InlineKeyboardButton("Close", callback_data="s:close")])
     return types.InlineKeyboardMarkup(rows)
 
@@ -38,21 +35,6 @@ def limit_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(str(value), callback_data=f"s:limit:{value}") for value in LIMITS],
         [types.InlineKeyboardButton("Back", callback_data="s:home")],
     ])
-
-
-def sites_keyboard(chat: ChatSettings, settings: Settings) -> types.InlineKeyboardMarkup:
-    names = {**SITE_NAMES, OTHER_SITE_ID: OTHER_SITE_NAME}
-    buttons = [
-        types.InlineKeyboardButton(
-            f"{'❌' if site_id in chat.disabled_extractors else '✅'} {name}",
-            callback_data=f"s:site:{site_id}",
-        )
-        for site_id, name in sorted(names.items(), key=lambda pair: pair[1])
-        if not settings.site(site_id).disabled
-    ]
-    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
-    rows.append([types.InlineKeyboardButton("Back", callback_data="s:home")])
-    return types.InlineKeyboardMarkup(rows)
 
 
 async def is_group_admin(client: Client, chat_id: int, user_id: int) -> bool:
@@ -72,7 +54,7 @@ async def show_settings(client: Client, store: Store, message: types.Message) ->
 
 
 async def handle_callback(
-    client: Client, store: Store, settings: Settings, query: types.CallbackQuery,
+    client: Client, store: Store, query: types.CallbackQuery,
 ) -> bool:
     data = query.data or ""
     if not data.startswith("s:"):
@@ -98,10 +80,6 @@ async def handle_callback(
         await store.set_setting(chat_id, "media_album_limit", int(value))
         chat = await store.chat(chat_id, "group")
         action = "home"
-    elif action == "site" and value in {*SITE_NAMES, OTHER_SITE_ID}:
-        await store.set_extractor_enabled(chat_id, value, value in chat.disabled_extractors)
-        chat = await store.chat(chat_id, "group")
-        action = "sites"
     if action == "close":
         await query.answer()
         await query.message.delete()
@@ -110,8 +88,6 @@ async def handle_callback(
         text, markup = "Group settings", keyboard(chat)
     elif action == "limits":
         text, markup = "Choose the maximum number of items in a post:", limit_keyboard()
-    elif action == "sites":
-        text, markup = "Tap a site to enable or disable it:", sites_keyboard(chat, settings)
     else:
         await query.answer("Unknown setting.", show_alert=True)
         return True

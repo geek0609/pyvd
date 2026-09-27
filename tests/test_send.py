@@ -42,3 +42,22 @@ async def test_single_video_uses_hydrogram_upload(tmp_path: Path) -> None:
     sender = Sender(Client(), SimpleNamespace(max_file_size=2_000_000_000))
     assert await sender.send(1, media, "caption") == [sent]
     assert item.file_id == "cached-id"
+
+
+@pytest.mark.asyncio
+async def test_cached_video_uses_spoiler_capable_send() -> None:
+    sent = SimpleNamespace(video=SimpleNamespace(file_id="cached-id"))
+
+    class Client:
+        async def send_video(self, chat_id, source, **kwargs):
+            assert source == "cached-id"
+            assert kwargs["has_spoiler"] is True
+            return sent
+
+        async def send_cached_media(self, *args, **kwargs):
+            raise AssertionError("cached send cannot set a spoiler")
+
+    item = MediaItem(kind="video", file_id="cached-id", video_codec="avc")
+    media = Media("youtube", "abc", "https://youtu.be/abc", items=[item])
+    sender = Sender(Client(), SimpleNamespace(max_file_size=2_000_000_000))
+    assert await sender.send(-100, media, "caption", spoiler=True) == [sent]

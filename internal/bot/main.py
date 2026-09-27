@@ -8,36 +8,38 @@ from datetime import datetime, timedelta, timezone
 from hydrogram import Client, enums, filters, idle, types
 
 from internal.config.settings import Settings, load_settings
-from internal.bot.admin import PERIODS, show_error, show_stats, stats_keyboard, stats_text
+from internal.bot.chat import is_public_group
 from internal.bot.settings import handle_callback, show_settings
 from internal.bot.inline import Inline
 from internal.core.errors import MediaError
 from internal.core.tasks import JobRunner
 from internal.database.store import Store
-from internal.extractors.sites import SITE_NAMES, first_supported_url, search_extractors
-from internal.logger.main import configure_logging
+from internal.extractors.sites import PUBLIC_GROUP_SITE_NAMES, SITE_NAMES, first_supported_url, search_extractors
 from internal.networking.proxy import hydrogram_proxy
 
 
-LOG = logging.getLogger(__name__)
 TAG_RE = re.compile(r"(?<!\w)#(skip|spoiler|nsfw)\b", re.IGNORECASE)
 
 
-def help_text(kind: str, is_admin: bool) -> str:
+def help_text(kind: str, public_group: bool = False) -> str:
     lines = [
-        "Send me a supported media link to download it (up to 2 GB). "
+        "Send a supported media link in a DM or group to download it (up to 2 GB). "
         "Use /extractors <name> to search supported sites.",
         "Reply to a video I sent with /music to receive its audio. "
         "Videos without an audio track cannot be converted.",
-        "Add #skip to a link to ignore it, or #spoiler or #nsfw to hide the media.",
+        "Use #skip to ignore a link, #spoiler to hide media, or #nsfw to mark it.",
     ]
     if kind == "group":
         lines.append(
             "Group admins can use /settings to change captions, silent delivery, "
-            "marked 18+ media, album limits, enabled sites, and link deletion."
+            "album limits, link deletion, and whether to allow marked media. "
+            "Allowed marked media is hidden by a spoiler in public groups."
         )
-    if is_admin:
-        lines.append("Bot admins can use /stats and /derr <id>.")
+    if public_group:
+        lines.append(
+            "Public groups accept direct links from the listed site domains. "
+            "For other links, use PyVD in a DM or private group."
+        )
     return "\n\n".join(lines)
 
 
@@ -102,8 +104,7 @@ class Bot:
                 bot_commands(group=True), scope=types.BotCommandScopeAllGroupChats(),
             )
         except Exception:
-            LOG.warning("could not update bot command menus", exc_info=True)
-        LOG.info("started bot @%s", self.username)
+            pass
 
     async def on_chat_member_updated(self, _: Client, update: types.ChatMemberUpdated) -> None:
         old = update.old_chat_member
@@ -121,16 +122,20 @@ class Bot:
         await self.store.chat(update.chat.id, "group")
         await self.client.send_message(
             update.chat.id,
-            "Thanks for adding PyVD! Send a media link to download it, use /help "
+            "Thanks for adding PyVD! Send a link, use /help "
             "for commands, or use /settings to configure this group.",
         )
 
     async def on_message(self, _: Client, message: types.Message) -> None:
-        if not message.text or not message.from_user:
+        if not message.text:
             return
         kind = chat_kind(message)
-        if kind is None or not allowed(self.settings, message.chat.id, message.from_user.id):
+        if kind is None or (kind == "private" and not message.from_user):
             return
+        user_id = message.from_user.id if message.from_user else None
+        if not allowed(self.settings, message.chat.id, user_id):
+            return
+        public_group = is_public_group(message.chat)
         sent_at = message.date
         if sent_at and sent_at.tzinfo is None:
             sent_at = sent_at.replace(tzinfo=timezone.utc)
@@ -142,6 +147,8 @@ class Bot:
         command = name.lower() if not mention or mention.lower() == self.username.lower() else ""
         if token and not command:
             return
+        if command and not message.from_user:
+            return
         if command == "/start":
             await message.reply(
                 "I’m PyVD. Send me a media link and I’ll download it. "
@@ -151,12 +158,26 @@ class Bot:
             return
         if command == "/help":
             await message.reply(
-                help_text(kind, message.from_user.id in self.settings.admins),
+                help_text(kind, public_group),
                 parse_mode=enums.ParseMode.DISABLED,
             )
             return
         if command == "/extractors":
             term = text.partition(" ")[2].strip()
+            if public_group:
+                names = [
+                    name for site_id, name in sorted(
+                        PUBLIC_GROUP_SITE_NAMES.items(), key=lambda item: item[1],
+                    )
+                    if term.casefold() in site_id.casefold() or term.casefold() in name.casefold()
+                ]
+                await message.reply(
+                    ("Supported here: " + ", ".join(names) if names else "No matching site here.")
+                    + "\nOther domains are outside the public group allowlist. "
+                    "Use PyVD in a DM or private group.",
+                    parse_mode=enums.ParseMode.DISABLED,
+                )
+                return
             if term:
                 matches, total = search_extractors(term)
                 lines = [f"{name} ({site_id})" for site_id, name in matches]
@@ -185,6 +206,11 @@ class Bot:
                         message.chat.id, message.reply_to_message_id,
                     )
                 video = replied_video(replied, self.bot_id)
+                if public_group and getattr(replied, "has_media_spoiler", False):
+                    raise MediaError(
+                        "Audio from spoilered videos is unavailable here. "
+                        "Use a DM or private group."
+                    )
                 if self.runner is None:
                     raise RuntimeError("bot is not started")
                 chat = await self.store.chat(message.chat.id, kind)
@@ -192,28 +218,19 @@ class Bot:
                 await status.delete()
             except MediaError as exc:
                 await status.edit_text(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
-            except Exception as exc:
-                LOG.exception("unexpected failure extracting audio in chat %s", message.chat.id)
+            except Exception:
                 try:
-                    error_id = await self.store.log_error(exc)
                     await status.edit_text(
-                        f"⚠️ Audio extraction failed. Error ID: {error_id}",
+                        "⚠️ Audio extraction failed. Please try again later.",
                         parse_mode=enums.ParseMode.DISABLED,
                     )
                 except Exception:
-                    LOG.exception("could not report audio extraction failure")
-            return
-        if command == "/stats":
-            if message.from_user.id in self.settings.admins:
-                await show_stats(self.store, message)
-            return
-        if command == "/derr":
-            if message.from_user.id in self.settings.admins:
-                await show_error(self.store, message, text.partition(" ")[2].strip())
+                    pass
             return
         if command:
             return
-        if "skip" in {tag.lower() for tag in TAG_RE.findall(text)}:
+        tags = {tag.lower() for tag in TAG_RE.findall(text)}
+        if "skip" in tags:
             return
         request = first_supported_url(text)
         if request is None:
@@ -225,27 +242,25 @@ class Bot:
         try:
             await self.runner.run(
                 request, chat, message.chat.id, reply_to=message.id,
-                spoiler=bool({"spoiler", "nsfw"} & {tag.lower() for tag in TAG_RE.findall(text)}),
-                status=status,
+                spoiler="spoiler" in tags, marked_nsfw="nsfw" in tags,
+                status=status, public_group=public_group,
             )
             await status.delete()
             if kind == "group" and chat.delete_links:
                 try:
                     await message.delete()
                 except Exception:
-                    LOG.debug("could not delete source link", exc_info=True)
+                    pass
         except MediaError as exc:
             await status.edit_text(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
-        except Exception as exc:
-            LOG.exception("unexpected failure for %s", request.key)
+        except Exception:
             try:
-                error_id = await self.store.log_error(exc)
                 await status.edit_text(
-                    f"⚠️ Download failed. Error ID: {error_id}",
+                    "⚠️ Download failed. Please try again later.",
                     parse_mode=enums.ParseMode.DISABLED,
                 )
             except Exception:
-                LOG.exception("could not report failure")
+                pass
 
     async def on_callback(self, _: Client, query: types.CallbackQuery) -> None:
         if not allowed(
@@ -254,27 +269,18 @@ class Bot:
         ):
             await query.answer()
             return
-        if await handle_callback(self.client, self.store, self.settings, query):
+        if await handle_callback(self.client, self.store, query):
             return
         data = query.data or ""
         if data == "inline:loading":
             await query.answer("Still processing this media.", show_alert=True)
             return
-        if data.startswith("stats:") and query.from_user.id in self.settings.admins:
-            period = data.partition(":")[2]
-            if period in {*PERIODS, "all"}:
-                await query.answer()
-                await query.edit_message_text(
-                    await stats_text(self.store, period),
-                    reply_markup=stats_keyboard(), parse_mode=enums.ParseMode.DISABLED,
-                )
-                return
         await query.answer()
 
 
 async def run() -> None:
     settings = load_settings()
-    configure_logging(settings)
+    logging.disable(logging.CRITICAL)
     store = Store(settings)
     await store.open()
     app = Client(

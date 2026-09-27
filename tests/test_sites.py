@@ -4,12 +4,13 @@ from types import SimpleNamespace
 import pytest
 
 from internal.core.errors import MediaError
-from internal.core.tasks import JobRunner
+from internal.core.tasks import JobRunner, delivery_spoiler
 from internal.extractors.cookies import job_cookie_file
 from internal.extractors.sites import (
-    Request, _named_extractors, _site_id, first_supported_url, identify, search_extractors,
+    PUBLIC_GROUP_HOSTS, PUBLIC_GROUP_SITE_NAMES, Request, _named_extractors, _site_id,
+    allowed_in_public_group, first_supported_url, identify, search_extractors,
 )
-from internal.models.media import ChatSettings
+from internal.models.media import ChatSettings, Media, MediaItem
 
 
 def test_govd_site_ids() -> None:
@@ -29,6 +30,29 @@ def test_govd_site_ids() -> None:
         request = identify(url)
         assert request is not None
         assert (request.extractor_id, request.content_id) == expected
+        assert allowed_in_public_group(request)
+
+
+def test_public_group_rejects_unlisted_domains() -> None:
+    assert set(PUBLIC_GROUP_HOSTS) == set(PUBLIC_GROUP_SITE_NAMES)
+    assert not allowed_in_public_group(identify("https://vimeo.com/123456"))
+    assert not allowed_in_public_group(identify("https://t.co/abc123"))
+    assert not allowed_in_public_group(Request("youtube", "id", "https://vimeo.com/123456"))
+
+
+def test_public_group_allowlist_includes_curated_sites() -> None:
+    cases = {
+        "pbskids": "https://pbskids.org/video/molly-of-denali/3030407927",
+        "lego": "https://www.lego.com/en-us/videos/themes/club/blocumentary-kawaguchi-55492d823b1b4d5e985787fa8c2973b1",
+        "nick.com": "https://www.nick.com/video-clips/0p4706/spongebob-squarepants-spongebob-loving-the-krusty-krab-for-7-minutes",
+        "kika": "https://www.kika.de/kaltstart/videos/video92498",
+        "toggo": "https://www.toggo.de/weihnachtsmann--co-kg/folge/ein-geschenk-fuer-zwei",
+    }
+    for site_id, url in cases.items():
+        request = identify(url)
+        assert request is not None
+        assert request.extractor_id == site_id
+        assert allowed_in_public_group(request)
 
 
 def test_rejects_unrelated_or_local_urls() -> None:
@@ -42,17 +66,17 @@ def test_rejects_unrelated_or_local_urls() -> None:
 
 def test_named_ytdlp_extractors_are_recognized_without_changing_govd_ids() -> None:
     cases = {
-        "https://vimeo.com/123456": "vimeo",
-        "https://www.dailymotion.com/video/x8abcde": "dailymotion",
-        "https://www.twitch.tv/videos/123456789": "twitch",
+        "https://vimeo.com/123456": ("vimeo", "123456"),
+        "https://www.dailymotion.com/video/x8abcde": ("dailymotion", "x8abcde"),
+        "https://www.twitch.tv/videos/123456789": ("twitch", "123456789"),
     }
-    for url, site_id in cases.items():
+    for url, (site_id, content_id) in cases.items():
         request = identify(url)
         assert request is not None
-        assert request.extractor_id == site_id
-        assert len(request.content_id) == 32
+        assert (request.extractor_id, request.content_id) == (site_id, content_id)
         assert len(request.extractor_id) <= 30
         assert request.url == url
+    assert identify("https://player.vimeo.com/video/123456").content_id == "123456"
     assert identify("https://youtu.be/YE7VzlLtp-4").extractor_id == "youtube"
     matches, total = search_extractors("vimeo")
     assert total >= 1
@@ -78,11 +102,96 @@ def test_cookies_are_copied_not_modified(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_group_can_disable_all_additional_ytdlp_sites() -> None:
+async def test_global_config_can_disable_all_additional_ytdlp_sites() -> None:
     settings = SimpleNamespace(
-        site=lambda _: SimpleNamespace(disabled=False, ignore_regex=()),
+        site=lambda site_id: SimpleNamespace(
+            disabled=site_id == "ytdlp", ignore_regex=(),
+        ),
     )
     runner = JobRunner(SimpleNamespace(), settings, SimpleNamespace(), "pyvd")
-    chat = ChatSettings(-100, "group", True, False, True, 10, False, ("ytdlp",))
+    chat = ChatSettings(-100, "group", True, False, True, 10, False)
     with pytest.raises(MediaError, match="disabled"):
         await runner.run(Request("vimeo", "id", "https://vimeo.com/123456"), chat, -100)
+
+
+@pytest.mark.asyncio
+async def test_public_group_blocks_additional_site_before_lookup() -> None:
+    runner = JobRunner(SimpleNamespace(), SimpleNamespace(), SimpleNamespace(), "pyvd")
+    chat = ChatSettings(-100, "group", True, False, True, 10, False)
+    with pytest.raises(MediaError, match="not in the public group allowlist"):
+        await runner.run(
+            Request("vimeo", "id", "https://vimeo.com/123456"), chat, -100,
+            public_group=True,
+        )
+
+
+def test_marked_media_requires_group_permission_and_public_spoiler() -> None:
+    video = Media(
+        "youtube", "id", "https://youtu.be/YE7VzlLtp-4", nsfw=True,
+        items=[MediaItem(kind="video", file_id="cached", video_codec="avc")],
+    )
+    blocked = ChatSettings(-100, "group", True, False, False, 10, False)
+    allowed = ChatSettings(-100, "group", True, False, True, 10, False)
+    with pytest.raises(MediaError, match="disabled"):
+        delivery_spoiler(video, blocked, True, False)
+    assert delivery_spoiler(video, allowed, True, False)
+    assert not delivery_spoiler(video, allowed, False, False)
+    with pytest.raises(MediaError, match="group inline mode"):
+        delivery_spoiler(video, ChatSettings(123, "private", True, False, True, 10, False), True, False)
+
+
+def test_tagged_media_obeys_group_setting_without_poisoning_cache() -> None:
+    video = Media(
+        "youtube", "id", "https://youtu.be/YE7VzlLtp-4",
+        items=[MediaItem(kind="video", file_id="cached", video_codec="avc")],
+    )
+    blocked = ChatSettings(-100, "group", True, False, False, 10, False)
+    allowed = ChatSettings(-100, "group", True, False, True, 10, False)
+    with pytest.raises(MediaError, match="disabled"):
+        delivery_spoiler(video, blocked, True, False, marked_nsfw=True)
+    assert delivery_spoiler(video, allowed, True, False, marked_nsfw=True)
+    assert not delivery_spoiler(video, allowed, False, False, marked_nsfw=True)
+    assert not video.nsfw
+
+
+def test_public_group_rejects_marked_media_without_spoiler_support() -> None:
+    media = Media(
+        "youtube", "id", "https://youtu.be/YE7VzlLtp-4", nsfw=True,
+        items=[MediaItem(kind="audio", file_id="cached", audio_codec="mp3")],
+    )
+    allowed = ChatSettings(-100, "group", True, False, True, 10, False)
+    with pytest.raises(MediaError, match="cannot be sent with a spoiler"):
+        delivery_spoiler(media, allowed, True, False)
+
+
+@pytest.mark.asyncio
+async def test_cached_marked_video_is_sent_with_spoiler_in_public_group() -> None:
+    media = Media(
+        "youtube", "id", "", nsfw=True,
+        items=[MediaItem(kind="video", file_id="cached", video_codec="avc")],
+    )
+
+    class Store:
+        async def cached_media(self, extractor_id, content_id):
+            assert (extractor_id, content_id) == ("youtube", "id")
+            return media
+
+    class Sender:
+        async def send(self, chat_id, sent_media, caption, **kwargs):
+            assert chat_id == -100 and sent_media is media
+            assert sent_media.url == "https://youtu.be/YE7VzlLtp-4"
+            assert kwargs["spoiler"] is True
+            return []
+
+    settings = SimpleNamespace(
+        caching=True, captions_header="", captions_description="",
+        site=lambda _: SimpleNamespace(disabled=False, ignore_regex=()),
+    )
+    runner = JobRunner(SimpleNamespace(), settings, Store(), "pyvd")
+    runner.sender = Sender()
+    chat = ChatSettings(-100, "group", False, False, True, 10, False)
+    result = await runner.run(
+        Request("youtube", "id", "https://youtu.be/YE7VzlLtp-4"), chat, -100,
+        public_group=True,
+    )
+    assert result.media is media

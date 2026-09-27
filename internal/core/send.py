@@ -140,7 +140,16 @@ class Sender:
             "disable_notification": silent, "reply_to_message_id": reply_to,
         }
         if item.file_id:
-            sent = await self.client.send_cached_media(chat_id, item.file_id, **common)
+            if spoiler and item.delivery_kind == "photo":
+                sent = await self.client.send_photo(
+                    chat_id, item.file_id, has_spoiler=True, **common,
+                )
+            elif spoiler and item.delivery_kind == "video":
+                sent = await self.client.send_video(
+                    chat_id, item.file_id, has_spoiler=True, **common,
+                )
+            else:
+                sent = await self.client.send_cached_media(chat_id, item.file_id, **common)
         else:
             if item.path is None or not item.path.is_file():
                 raise MediaError("A file is missing before upload.")

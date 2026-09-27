@@ -43,6 +43,12 @@ def test_downloaded_file_is_turned_into_media(tmp_path: Path, monkeypatch: pytes
     assert "node" in captured["js_runtimes"]
 
 
+def test_marked_playlist_entry_marks_the_post() -> None:
+    assert downloader._marked_nsfw({"entries": [{"age_limit": 0}, {"age_limit": 18}]})
+    assert downloader._marked_nsfw({"age_limit": 18, "entries": [{"age_limit": None}]})
+    assert not downloader._marked_nsfw({"entries": [{"age_limit": 0}]})
+
+
 def test_progress_stops_oversized_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeYDL:
         def __init__(self, opts):

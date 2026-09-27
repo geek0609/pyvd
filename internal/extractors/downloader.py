@@ -1,7 +1,6 @@
 """Download supported posts with yt-dlp, preserving govd cookie files."""
 
 import asyncio
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +12,6 @@ from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
 
 
-LOG = logging.getLogger(__name__)
 DEFAULT_FORMAT = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best"
 YOUTUBE_FORMAT = (
     "bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/"
@@ -22,18 +20,18 @@ YOUTUBE_FORMAT = (
 )
 
 
-class _YtdlpLogger:
+class _SilentYtdlpLogger:
     def debug(self, message: str) -> None:
-        LOG.debug("yt-dlp: %s", message)
+        pass
 
     def info(self, message: str) -> None:
-        LOG.info("yt-dlp: %s", message)
+        pass
 
     def warning(self, message: str) -> None:
-        LOG.warning("yt-dlp: %s", message)
+        pass
 
     def error(self, message: str) -> None:
-        LOG.error("yt-dlp: %s", message)
+        pass
 
 
 def _entries(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -44,6 +42,16 @@ def _entries(info: dict[str, Any]) -> list[dict[str, Any]]:
         if entry:
             result.extend(_entries(entry))
     return result
+
+
+def _marked_nsfw(info: dict[str, Any]) -> bool:
+    for entry in (info, *_entries(info)):
+        try:
+            if int(entry.get("age_limit") or 0) >= 18:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _paths(info: dict[str, Any], workdir: Path) -> list[tuple[Path, dict[str, Any]]]:
@@ -106,7 +114,7 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
         "max_filesize": settings.max_file_size,
         "match_filter": duration_filter,
         "progress_hooks": [progress],
-        "logger": _YtdlpLogger(),
+        "logger": _SilentYtdlpLogger(),
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
@@ -145,7 +153,7 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
         raise MediaError("The post contains more than 20 media items.")
     media = Media(request.extractor_id, request.content_id, request.url)
     media.caption = str(info.get("description") or info.get("title") or "")
-    media.nsfw = bool(info.get("age_limit") and info["age_limit"] >= 18)
+    media.nsfw = _marked_nsfw(info)
     for path, entry in paths:
         size = path.stat().st_size
         if size > settings.max_file_size:
@@ -177,5 +185,5 @@ async def download(request: Request, settings: Settings, workdir: Path) -> Media
         try:
             return await download_gallery(request, settings, workdir)
         except NoMedia:
-            LOG.info("gallery extraction unavailable for %s; trying yt-dlp", request.extractor_id)
+            pass
     return await asyncio.to_thread(_download_in_process, request, settings, workdir)

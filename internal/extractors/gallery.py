@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 import shutil
 import sys
 from pathlib import Path
@@ -14,7 +13,6 @@ from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
 
 
-LOG = logging.getLogger(__name__)
 GALLERY_SITES = {"instagram", "pinterest", "reddit", "threads", "ninegag"}
 PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 AUDIO_SUFFIXES = {".mp3", ".m4a", ".flac", ".ogg", ".opus"}
@@ -48,6 +46,34 @@ def _caption(directory: Path) -> str:
     return ""
 
 
+def _marked_nsfw(directory: Path) -> bool:
+    markers = {"over_18", "nsfw", "is_nsfw", "sensitive", "possibly_sensitive"}
+
+    def marked(value: object) -> bool:
+        if isinstance(value, dict):
+            if any(value.get(key) is True for key in markers):
+                return True
+            limit = value.get("age_limit")
+            if isinstance(limit, (int, float, str)) and not isinstance(limit, bool):
+                try:
+                    if float(limit) >= 18:
+                        return True
+                except ValueError:
+                    pass
+            return any(marked(item) for item in value.values() if isinstance(item, (dict, list)))
+        if isinstance(value, list):
+            return any(marked(item) for item in value)
+        return False
+
+    for path in directory.rglob("*.json"):
+        try:
+            if marked(json.loads(path.read_text())):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 async def download_gallery(request: Request, settings: Settings, workdir: Path) -> Media:
     site = settings.site(request.extractor_id)
     if site.edge_proxy:
@@ -67,7 +93,7 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
         command.extend(["--cookies", str(cookie)])
     command.append(request.url)
     process = await asyncio.create_subprocess_exec(
-        *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
     )
     output_task = asyncio.create_task(process.communicate())
     try:
@@ -85,18 +111,20 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
                 process.kill()
                 await output_task
                 raise NoMedia("Not enough free disk space for this download.")
-        _, stderr = await output_task
+        await output_task
     finally:
         if process.returncode is None:
             process.kill()
             await process.wait()
     paths = files_in(gallery_dir)
     if not paths:
-        LOG.debug("gallery-dl returned %s: %s", process.returncode, stderr.decode(errors="replace")[-500:])
         raise NoMedia("No media was found by the gallery extractor.")
     if len(paths) > 20:
         raise MediaError("The post contains more than 20 media items.")
-    media = Media(request.extractor_id, request.content_id, request.url, caption=_caption(gallery_dir))
+    media = Media(
+        request.extractor_id, request.content_id, request.url,
+        caption=_caption(gallery_dir), nsfw=_marked_nsfw(gallery_dir),
+    )
     for path in paths:
         suffix = path.suffix.lower()
         kind = "photo" if suffix in PHOTO_SUFFIXES else "audio" if suffix in AUDIO_SUFFIXES else "video"

@@ -1,7 +1,6 @@
 """Run link jobs with bounded concurrency and per-post deduplication."""
 
 import asyncio
-import logging
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -16,12 +15,9 @@ from internal.core.media import extract_audio, prepare
 from internal.core.send import Sender, format_caption
 from internal.database.store import Store
 from internal.extractors.downloader import download
-from internal.extractors.sites import OTHER_SITE_ID, SITE_NAMES, Request
+from internal.extractors.sites import OTHER_SITE_ID, SITE_NAMES, Request, allowed_in_public_group
 from internal.extractors.stream import try_stream_upload
 from internal.models.media import ChatSettings, Media
-
-
-LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,6 +30,31 @@ def stale_youtube_cache(media: Media) -> bool:
     return media.extractor_id == "youtube" and any(
         item.kind == "video" and item.delivery_kind == "document" for item in media.items
     )
+
+
+def check_group_nsfw(
+    media: Media, chat: ChatSettings, public_group: bool, marked_nsfw: bool = False,
+) -> None:
+    if not (media.nsfw or marked_nsfw):
+        return
+    if public_group and chat.kind != "group":
+        raise MediaError(
+            "This link is unavailable in group inline mode. "
+            "Send it as a regular group message instead."
+        )
+    if chat.kind == "group" and not chat.nsfw:
+        raise MediaError("Marked media is disabled in this group.")
+
+
+def delivery_spoiler(
+    media: Media, chat: ChatSettings, public_group: bool,
+    requested: bool, marked_nsfw: bool = False,
+) -> bool:
+    check_group_nsfw(media, chat, public_group, marked_nsfw)
+    spoiler = requested or (public_group and (media.nsfw or marked_nsfw))
+    if spoiler and any(item.delivery_kind not in {"photo", "video"} for item in media.items):
+        raise MediaError("This media cannot be sent with a spoiler. Use a DM or private group.")
+    return spoiler
 
 
 class JobRunner:
@@ -68,7 +89,7 @@ class JobRunner:
             try:
                 await status.edit_text(text, parse_mode=enums.ParseMode.DISABLED)
             except Exception:
-                LOG.debug("could not update status message", exc_info=True)
+                pass
 
     async def run_music(
         self, video: types.Video | types.Document, chat: ChatSettings,
@@ -125,38 +146,48 @@ class JobRunner:
         self, request: Request, chat: ChatSettings, target_chat_id: int,
         reply_to: int | None = None, spoiler: bool = False,
         status: types.Message | None = None, inline: bool = False,
+        public_group: bool = False, marked_nsfw: bool = False,
     ) -> Delivery:
+        if public_group and not allowed_in_public_group(request):
+            raise MediaError(
+                "This domain is not in the public group allowlist. "
+                "Send the link to PyVD in a DM or private group."
+            )
+        if marked_nsfw and chat.kind == "group" and not chat.nsfw:
+            raise MediaError("Marked media is disabled in this group.")
         site = self.settings.site(request.extractor_id)
-        other_disabled = request.extractor_id not in SITE_NAMES and (
-            OTHER_SITE_ID in chat.disabled_extractors or self.settings.site(OTHER_SITE_ID).disabled
+        other_disabled = (
+            request.extractor_id not in SITE_NAMES
+            and self.settings.site(OTHER_SITE_ID).disabled
         )
-        if site.disabled or request.extractor_id in chat.disabled_extractors or other_disabled:
-            raise MediaError("This site is disabled in this chat.")
+        if site.disabled or other_disabled:
+            raise MediaError("This site is disabled by configuration.")
         if any(pattern.search(request.url) for pattern in site.ignore_regex):
             raise MediaError("This link is ignored by the site configuration.")
         async with self._lock(request.key), self.capacity:
             cached = await self.store.cached_media(request.extractor_id, request.content_id) if self.settings.caching else None
             if cached and stale_youtube_cache(cached):
-                LOG.info("refreshing unsupported YouTube video format for %s", request.key)
                 cached = None
             if cached and (not inline or len(cached.items) == 1):
+                cached.url = request.url
                 if chat.kind == "group" and len(cached.items) > chat.media_album_limit:
                     raise MediaError("This post exceeds this group's album limit.")
-                if chat.kind == "group" and cached.nsfw and not chat.nsfw:
-                    raise MediaError("NSFW media is disabled in this group.")
+                send_spoiler = delivery_spoiler(
+                    cached, chat, public_group, spoiler, marked_nsfw,
+                )
                 try:
                     await self._status(status, "Sending cached media…")
                     messages = await self.sender.send(
                         target_chat_id, cached,
                         format_caption(cached, chat, self.settings, self.username),
-                        reply_to=reply_to, silent=chat.silent, spoiler=spoiler, status=status,
+                        reply_to=reply_to, silent=chat.silent,
+                        spoiler=send_spoiler, status=status,
                     )
                     return Delivery(cached, messages)
                 except Exception as exc:
                     code = str(exc).upper()
                     if not any(part in code for part in ("FILE_ID_INVALID", "FILE_REFERENCE", "MEDIA_EMPTY", "FILE_ID")):
                         raise
-                    LOG.warning("cached media ID rejected for %s: %s", request.key, exc)
 
             await self._status(status, "Downloading media…")
             self.settings.downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -165,26 +196,28 @@ class JobRunner:
                 streamed = await try_stream_upload(self.client, request, self.settings, workdir, status)
                 if streamed:
                     media = streamed.media
-                    if chat.kind == "group" and media.nsfw and not chat.nsfw:
-                        raise MediaError("NSFW media is disabled in this group.")
+                    check_group_nsfw(media, chat, public_group, marked_nsfw)
                     await self._status(status, "Preparing media…")
                     try:
                         media = await prepare(media, self.settings)
                     except MediaError:
-                        LOG.warning("streamed media could not be prepared for %s", request.key)
+                        pass
                     else:
                         if media.items[0].delivery_kind == "video":
+                            send_spoiler = delivery_spoiler(
+                                media, chat, public_group, spoiler, marked_nsfw,
+                            )
                             await self._status(status, "Sending media…")
                             message = await self.sender.send_preuploaded_video(
                                 target_chat_id, media.items[0], streamed.file,
                                 format_caption(media, chat, self.settings, self.username),
-                                reply_to, chat.silent, spoiler,
+                                reply_to, chat.silent, send_spoiler,
                             )
                             if self.settings.caching:
                                 try:
                                     await self.store.save_media(media)
                                 except Exception:
-                                    LOG.exception("could not cache uploaded media for %s", request.key)
+                                    pass
                             return Delivery(media, [message])
                     (workdir / "streamed.mp4").unlink(missing_ok=True)
                 media = await download(request, self.settings, workdir)
@@ -192,19 +225,22 @@ class JobRunner:
                     raise MediaError("Inline mode supports one media item per link.")
                 if chat.kind == "group" and len(media.items) > chat.media_album_limit:
                     raise MediaError("This post exceeds this group's album limit.")
-                if chat.kind == "group" and media.nsfw and not chat.nsfw:
-                    raise MediaError("NSFW media is disabled in this group.")
+                check_group_nsfw(media, chat, public_group, marked_nsfw)
                 await self._status(status, "Preparing media…")
                 media = await prepare(media, self.settings)
+                send_spoiler = delivery_spoiler(
+                    media, chat, public_group, spoiler, marked_nsfw,
+                )
                 await self._status(status, "Uploading media…")
                 messages = await self.sender.send(
                     target_chat_id, media,
                     format_caption(media, chat, self.settings, self.username),
-                    reply_to=reply_to, silent=chat.silent, spoiler=spoiler, status=status,
+                    reply_to=reply_to, silent=chat.silent,
+                    spoiler=send_spoiler, status=status,
                 )
                 if self.settings.caching:
                     try:
                         await self.store.save_media(media)
                     except Exception:
-                        LOG.exception("could not cache uploaded media for %s", request.key)
+                        pass
                 return Delivery(media, messages)

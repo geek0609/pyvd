@@ -14,7 +14,31 @@ SITE_NAMES = {
     "threads": "Threads", "tiktok": "TikTok", "twitter": "X", "youtube": "YouTube",
 }
 OTHER_SITE_ID = "ytdlp"
-OTHER_SITE_NAME = "Other yt-dlp sites"
+PUBLIC_GROUP_SITE_NAMES = {
+    **SITE_NAMES,
+    "kika": "KiKA",
+    "lego": "LEGO",
+    "nick.com": "Nickelodeon",
+    "pbskids": "PBS Kids",
+    "toggo": "TOGGO",
+}
+PUBLIC_GROUP_HOSTS = {
+    "facebook": ("facebook.com", "fb.watch"),
+    "instagram": ("instagram.com", "ddinstagram.com"),
+    "kika": ("kika.de",),
+    "lego": ("lego.com",),
+    "ninegag": ("9gag.com",),
+    "nick.com": ("nick.com",),
+    "pbskids": ("pbskids.org",),
+    "pinterest": ("pinterest.com", "pin.it"),
+    "reddit": ("reddit.com", "redd.it", "redditmedia.com"),
+    "soundcloud": ("soundcloud.com",),
+    "threads": ("threads.net", "threads.com"),
+    "tiktok": ("tiktok.com",),
+    "toggo": ("toggo.de",),
+    "twitter": ("twitter.com", "x.com", "fxtwitter.com", "vxtwitter.com"),
+    "youtube": ("youtube.com", "youtube-nocookie.com", "youtu.be"),
+}
 
 
 @lru_cache(maxsize=1)
@@ -71,6 +95,11 @@ class Request:
 
 def _host_matches(host: str, *domains: str) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in domains)
+
+
+def allowed_in_public_group(request: Request) -> bool:
+    host = (urlsplit(request.url).hostname or "").lower()
+    return _host_matches(host, *PUBLIC_GROUP_HOSTS.get(request.extractor_id, ()))
 
 
 def identify(url: str) -> Request | None:
@@ -149,7 +178,15 @@ def identify(url: str) -> Request | None:
         if not site:
             return None
         clean_url = urlunsplit((parsed.scheme, parsed.netloc.lower(), path, parsed.query, parsed.fragment))
-        return Request(site, hashlib.sha256(clean_url.encode()).hexdigest()[:32], clean_url)
+        try:
+            native_id = extractor._match_id(clean_url)
+        except (AttributeError, IndexError, ValueError):
+            native_id = None
+        content_id = (
+            native_id if isinstance(native_id, str) and 0 < len(native_id) <= 50
+            else hashlib.sha256(clean_url.encode()).hexdigest()[:32]
+        )
+        return Request(site, content_id, clean_url)
     clean_url = urlunsplit(("https", host, parsed.path, parsed.query, ""))
     if not content_id:
         content_id = hashlib.sha256(clean_url.encode()).hexdigest()[:32]

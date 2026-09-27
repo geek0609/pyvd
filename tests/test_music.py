@@ -66,6 +66,36 @@ async def test_music_command_routes_reply_and_removes_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_group_music_rejects_spoilered_video() -> None:
+    replies = []
+
+    class Status:
+        async def edit_text(self, text, **kwargs):
+            replies.append(text)
+
+    class Message:
+        text = "/music"
+        date = datetime.now(timezone.utc)
+        chat = SimpleNamespace(id=-100, type=enums.ChatType.SUPERGROUP, username="publicgroup")
+        from_user = SimpleNamespace(id=7)
+        reply_to_message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42), video=SimpleNamespace(file_id="video"),
+            has_media_spoiler=True,
+        )
+        id = 6
+
+        async def reply(self, text, **kwargs):
+            return Status()
+
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), SimpleNamespace())
+    bot.bot_id = 42
+    await bot.on_message(None, Message())
+    assert replies == [
+        "⚠️ Audio from spoilered videos is unavailable here. Use a DM or private group."
+    ]
+
+
+@pytest.mark.asyncio
 async def test_music_rejects_oversize_video_before_download(tmp_path: Path) -> None:
     settings = SimpleNamespace(max_file_size=100, max_duration=3600, downloads_dir=tmp_path)
     runner = JobRunner(SimpleNamespace(), settings, SimpleNamespace(), "pyvd")
