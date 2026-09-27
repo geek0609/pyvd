@@ -64,6 +64,24 @@ def test_rejects_unrelated_or_local_urls() -> None:
     assert first_supported_url("hello https://www.instagram.com/p/Cabc123/ nice")
 
 
+def test_known_sites_require_a_media_post_or_short_link() -> None:
+    for url in (
+        "https://www.youtube.com/", "https://www.youtube.com/@channel",
+        "https://www.instagram.com/username/", "https://www.tiktok.com/@user",
+        "https://x.com/username", "https://www.facebook.com/username",
+        "https://www.reddit.com/r/test/", "https://www.pinterest.com/username/",
+        "https://soundcloud.com/artist", "https://soundcloud.com/artist/sets/album",
+        "https://9gag.com/", "https://www.threads.net/@username",
+    ):
+        assert identify(url) is None, url
+    assert identify("https://t.co/abc123") is not None
+    assert identify("https://vm.tiktok.com/ZMabcdef/") is not None
+    assert identify("https://www.reddit.com/gallery/abc123") is not None
+    assert first_supported_url(
+        "https://x.com/username https://youtu.be/YE7VzlLtp-4"
+    ).content_id == "YE7VzlLtp-4"
+
+
 def test_named_ytdlp_extractors_are_recognized_without_changing_govd_ids() -> None:
     cases = {
         "https://vimeo.com/123456": ("vimeo", "123456"),

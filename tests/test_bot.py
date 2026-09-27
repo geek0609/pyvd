@@ -6,6 +6,7 @@ from hydrogram import enums
 
 from internal.bot.main import Bot, allowed, bot_commands, chat_kind, help_text
 from internal.bot.chat import is_public_group
+from internal.core.errors import NoMedia
 from internal.models.media import ChatSettings
 from internal.networking.proxy import hydrogram_proxy
 
@@ -159,6 +160,46 @@ async def test_plain_links_download_in_dm_and_private_group(
     bot.runner = Runner()
     await bot.on_message(None, Message())
     assert calls == [("vimeo", kind, False)]
+
+
+@pytest.mark.asyncio
+async def test_non_media_links_leave_no_bot_reply() -> None:
+    replies = []
+
+    class Status:
+        async def delete(self):
+            replies.append("deleted")
+
+        async def edit_text(self, text, **kwargs):
+            replies.append(text)
+
+    class Message:
+        date = datetime.now(timezone.utc)
+        chat = SimpleNamespace(id=-100, type=enums.ChatType.SUPERGROUP, username="publicgroup")
+        from_user = SimpleNamespace(id=7)
+        id = 10
+
+        def __init__(self, text):
+            self.text = text
+
+        async def reply(self, text, **kwargs):
+            replies.append(text)
+            return Status()
+
+    class Store:
+        async def chat(self, chat_id, kind):
+            return ChatSettings(chat_id, kind, True, False, False, 10, False)
+
+    class Runner:
+        async def run(self, *args, **kwargs):
+            raise NoMedia("No media was found at this link.")
+
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
+    bot.runner = Runner()
+    await bot.on_message(None, Message("https://x.com/username"))
+    assert replies == []
+    await bot.on_message(None, Message("https://www.reddit.com/gallery/abc123"))
+    assert replies == ["Queued…", "deleted"]
 
 
 @pytest.mark.asyncio

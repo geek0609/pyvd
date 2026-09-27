@@ -11,7 +11,7 @@ from internal.config.settings import Settings, load_settings
 from internal.bot.chat import is_public_group
 from internal.bot.settings import handle_callback, show_settings
 from internal.bot.inline import Inline
-from internal.core.errors import MediaError
+from internal.core.errors import MediaError, NoMedia
 from internal.core.tasks import JobRunner
 from internal.database.store import Store
 from internal.extractors.sites import PUBLIC_GROUP_SITE_NAMES, SITE_NAMES, first_supported_url, search_extractors
@@ -259,6 +259,8 @@ class Bot:
                     await message.delete()
                 except Exception:
                     pass
+        except NoMedia:
+            await status.delete()
         except MediaError as exc:
             await status.edit_text(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
         except Exception:
