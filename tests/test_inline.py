@@ -5,6 +5,7 @@ import pytest
 from hydrogram import enums
 
 from internal.bot.inline import Inline
+from internal.bot.main import Bot
 from internal.extractors.sites import Request
 from internal.models.media import ChatSettings, Media, MediaItem
 
@@ -58,9 +59,60 @@ async def test_additional_sites_in_inline_queries_are_private_only(
     assert query.results is not None
     assert len(query.results) == expected_results
     if expected_results:
-        assert next(iter(inline.pending.values())).public_group == (
+        task_id, pending = next(iter(inline.pending.items()))
+        assert pending.public_group == (
             chat_type == enums.ChatType.SUPERGROUP
         )
+        button = query.results[0].reply_markup.inline_keyboard[0][0]
+        assert button.text == "Download"
+        assert button.callback_data == f"inline:download:{task_id}"
+
+
+@pytest.mark.asyncio
+async def test_inline_download_button_starts_without_chosen_feedback() -> None:
+    events = []
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), SimpleNamespace())
+    task_id = bot.inline.add(123, Request("youtube", "id", "https://youtu.be/id"))
+
+    async def deliver(pending, user_id, inline_message_id):
+        events.append((pending.request.content_id, user_id, inline_message_id))
+
+    bot.inline._deliver = deliver
+
+    class Callback:
+        data = f"inline:download:{task_id}"
+        inline_message_id = "inline-message"
+        message = None
+        from_user = SimpleNamespace(id=123)
+
+        async def answer(self, text=None, **kwargs):
+            events.append(("answer", text))
+
+    await bot.on_callback(None, Callback())
+    assert events == [
+        ("answer", "Downloading media…"),
+        ("id", 123, "inline-message"),
+    ]
+    assert task_id not in bot.inline.pending
+
+
+@pytest.mark.asyncio
+async def test_inline_download_button_rejects_other_user() -> None:
+    replies = []
+    inline = Inline(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    task_id = inline.add(123, Request("youtube", "id", "https://youtu.be/id"))
+
+    class Callback:
+        data = f"inline:download:{task_id}"
+        inline_message_id = "inline-message"
+        from_user = SimpleNamespace(id=999)
+
+        async def answer(self, text=None, **kwargs):
+            replies.append(text)
+
+    assert await inline.callback(Callback())
+    assert task_id in inline.pending
+    assert replies == ["This download has started or expired. Send the query again if needed."]
 
 
 @pytest.mark.asyncio

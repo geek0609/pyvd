@@ -28,10 +28,10 @@ Additional yt-dlp sites use their lowercase extractor family as `<site>` in
 ## BotFather setup
 
 For inline links, use `/setinline` in BotFather to enable inline mode for the
-bot, then use `/setinlinefeedback` and choose **100%**. PyVD replaces the
-selected inline result with media after Telegram sends the chosen-result
-update; a lower feedback rate leaves some results at "Preparing media…".
-Leave `/setinlinegeo` disabled because PyVD does not use location.
+bot. Use `/setinlinefeedback` at **100%** to start downloads when a result is
+selected. If feedback is unavailable, the selected result has a Download
+button that starts it. Leave `/setinlinegeo` disabled because PyVD does not
+use location.
 
 For automatic links in groups, disable group Privacy Mode with `/setprivacy`
 and keep `/setjoingroups` enabled. Telegram then delivers ordinary group

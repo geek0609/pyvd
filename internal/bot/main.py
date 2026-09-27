@@ -277,11 +277,13 @@ class Bot:
         ):
             await query.answer()
             return
+        if await self.inline.callback(query):
+            return
         if await handle_callback(self.client, self.store, query):
             return
         data = query.data or ""
         if data == "inline:loading":
-            await query.answer("Still processing this media.", show_alert=True)
+            await query.answer("Send the inline query again to start this download.", show_alert=True)
             return
         await query.answer()
 

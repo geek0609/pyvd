@@ -1,5 +1,6 @@
 """Inline query placeholder and single-item replacement."""
 
+import asyncio
 import secrets
 import time
 from dataclasses import dataclass
@@ -37,6 +38,10 @@ class Inline:
         self.pending = {key: item for key, item in self.pending.items() if item.expires > now}
         task_id = secrets.token_hex(8)
         self.pending[task_id] = Pending(user_id, request, now + 300, public_group)
+        try:
+            asyncio.get_running_loop().call_later(300, self.pending.pop, task_id, None)
+        except RuntimeError:
+            pass
         return task_id
 
     def pop(self, task_id: str, user_id: int) -> Pending | None:
@@ -65,21 +70,45 @@ class Inline:
         result = types.InlineQueryResultArticle(
             title="Share media", id=task_id,
             input_message_content=types.InputTextMessageContent(
-                "Preparing media…", parse_mode=enums.ParseMode.DISABLED,
+                "Preparing media… Tap Download if it does not start automatically.",
+                parse_mode=enums.ParseMode.DISABLED,
                 disable_web_page_preview=True,
             ),
             reply_markup=types.InlineKeyboardMarkup([[
-                types.InlineKeyboardButton("…", callback_data="inline:loading"),
+                types.InlineKeyboardButton(
+                    "Download", callback_data=f"inline:download:{task_id}",
+                ),
             ]]),
         )
         await query.answer([result], cache_time=0, is_personal=True)
 
     async def chosen(self, _: Client, chosen: types.ChosenInlineResult) -> None:
+        if not chosen.inline_message_id:
+            return
         pending = self.pop(chosen.result_id, chosen.from_user.id)
-        if pending is None or not chosen.inline_message_id or self.runner is None:
+        if pending is not None:
+            await self._deliver(pending, chosen.from_user.id, chosen.inline_message_id)
+
+    async def callback(self, query: types.CallbackQuery) -> bool:
+        data = query.data
+        if not isinstance(data, str) or not data.startswith("inline:download:"):
+            return False
+        if not query.inline_message_id or not query.from_user:
+            await query.answer("This inline result cannot be edited. Send the query again.", show_alert=True)
+            return True
+        task_id = data.removeprefix("inline:download:")
+        pending = self.pop(task_id, query.from_user.id)
+        if pending is None:
+            await query.answer("This download has started or expired. Send the query again if needed.", show_alert=True)
+            return True
+        await query.answer("Downloading media…")
+        await self._deliver(pending, query.from_user.id, query.inline_message_id)
+        return True
+
+    async def _deliver(self, pending: Pending, user_id: int, inline_message_id: str) -> None:
+        if self.runner is None:
             return
         request = pending.request
-        user_id = chosen.from_user.id
         staged: list[types.Message] = []
         try:
             chat = await self.store.chat(user_id, "private")
@@ -90,7 +119,7 @@ class Inline:
                     check_group_nsfw(cached, chat, pending.public_group)
                     try:
                         await self.client.edit_inline_media(
-                            chosen.inline_message_id,
+                            inline_message_id,
                             input_media(
                                 cached.items[0],
                                 format_caption(cached, chat, self.settings, self.username), False,
@@ -104,7 +133,7 @@ class Inline:
             )
             staged = delivery.messages
             await self.client.edit_inline_media(
-                chosen.inline_message_id,
+                inline_message_id,
                 input_media(
                     delivery.media.items[0],
                     format_caption(delivery.media, chat, self.settings, self.username), False,
@@ -113,7 +142,7 @@ class Inline:
         except Exception:
             try:
                 await self.client.edit_inline_text(
-                    chosen.inline_message_id,
+                    inline_message_id,
                     "⚠️ This link is unavailable here. Send it to PyVD in a DM or private group.",
                     parse_mode=enums.ParseMode.DISABLED,
                 )
