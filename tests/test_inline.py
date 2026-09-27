@@ -1,13 +1,50 @@
+import json
 import time
 from types import SimpleNamespace
 
 import pytest
 from hydrogram import enums
 
-from internal.bot.inline import Inline
+from internal.bot.inline import Inline, _edit_media
 from internal.bot.main import Bot
 from internal.extractors.sites import Request
 from internal.models.media import ChatSettings, Media, MediaItem
+
+
+def test_inline_video_edit_uses_uploaded_video_file_id(monkeypatch) -> None:
+    sent = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def read(self):
+            return b'{"ok":true,"result":true}'
+
+    def urlopen(request, timeout):
+        sent.update(json.loads(request.data))
+        assert request.full_url.endswith("/editMessageMedia")
+        assert timeout == 30
+        return Response()
+
+    monkeypatch.setattr("internal.bot.inline.urlopen", urlopen)
+    item = MediaItem(
+        kind="video", file_id="telegram-video-id", video_codec="avc",
+        audio_codec="aac", duration=15, width=1920, height=1080,
+    )
+    _edit_media("test-token", "inline-message", item, "<b>source</b>")
+    assert sent == {
+        "inline_message_id": "inline-message",
+        "media": {
+            "type": "video", "media": "telegram-video-id",
+            "caption": "<b>source</b>", "parse_mode": "HTML",
+            "supports_streaming": True, "duration": 15,
+            "width": 1920, "height": 1080,
+        },
+    }
 
 
 def test_inline_tasks_expire_and_belong_to_user() -> None:

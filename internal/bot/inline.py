@@ -1,19 +1,54 @@
 """Inline query placeholder and single-item replacement."""
 
 import asyncio
+import json
 import secrets
 import time
 from dataclasses import dataclass
+from urllib.request import Request as HttpRequest, urlopen
 
 from hydrogram import Client, enums, types
 
 from internal.config.settings import Settings
-from internal.core.send import format_caption, input_media
+from internal.core.errors import MediaError
+from internal.core.send import format_caption
 from internal.core.tasks import JobRunner, check_group_nsfw, stale_youtube_cache
 from internal.database.store import Store
 from internal.extractors.sites import (
     OTHER_SITE_ID, SITE_NAMES, Request, allowed_in_public_group, first_supported_url,
 )
+from internal.models.media import MediaItem
+
+
+def _edit_media(token: str, message_id: str, item: MediaItem, caption: str) -> None:
+    """Replace an inline article with media already uploaded to Telegram."""
+    if not item.file_id:
+        raise MediaError("Telegram did not return a reusable media ID.")
+    kind = item.delivery_kind
+    media = {
+        "type": kind,
+        "media": item.file_id,
+        "caption": caption,
+        "parse_mode": "HTML",
+    }
+    if kind == "video":
+        media["supports_streaming"] = True
+        media["duration"] = item.duration
+        media["width"] = item.width
+        media["height"] = item.height
+    elif kind == "audio":
+        media["duration"] = item.duration
+        media["performer"] = item.artist
+        media["title"] = item.title
+    request = HttpRequest(
+        f"https://api.telegram.org/bot{token}/editMessageMedia",
+        data=json.dumps({"inline_message_id": message_id, "media": media}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urlopen(request, timeout=30) as response:
+        result = json.load(response)
+    if result.get("ok") is not True or result.get("result") is not True:
+        raise MediaError("Telegram did not replace the inline message.")
 
 
 @dataclass
@@ -118,12 +153,10 @@ class Inline:
                     cached.url = request.url
                     check_group_nsfw(cached, chat, pending.public_group)
                     try:
-                        await self.client.edit_inline_media(
-                            inline_message_id,
-                            input_media(
-                                cached.items[0],
-                                format_caption(cached, chat, self.settings, self.username), False,
-                            ),
+                        await asyncio.to_thread(
+                            _edit_media, self.settings.bot_token, inline_message_id,
+                            cached.items[0],
+                            format_caption(cached, chat, self.settings, self.username),
                         )
                         return
                     except Exception:
@@ -132,12 +165,10 @@ class Inline:
                 request, chat, user_id, inline=True, public_group=pending.public_group,
             )
             staged = delivery.messages
-            await self.client.edit_inline_media(
-                inline_message_id,
-                input_media(
-                    delivery.media.items[0],
-                    format_caption(delivery.media, chat, self.settings, self.username), False,
-                ),
+            await asyncio.to_thread(
+                _edit_media, self.settings.bot_token, inline_message_id,
+                delivery.media.items[0],
+                format_caption(delivery.media, chat, self.settings, self.username),
             )
         except Exception:
             try:
