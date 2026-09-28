@@ -65,6 +65,7 @@ def test_inline_tasks_expire_and_belong_to_user() -> None:
     [
         (enums.ChatType.SUPERGROUP, "https://vimeo.com/123456", 0),
         (enums.ChatType.SUPERGROUP, "https://t.co/abc123", 0),
+        (enums.ChatType.PRIVATE, "https://t.me/example/123", 0),
         (enums.ChatType.PRIVATE, "https://vimeo.com/123456", 1),
         (enums.ChatType.SUPERGROUP, "https://youtu.be/YE7VzlLtp-4", 1),
     ],

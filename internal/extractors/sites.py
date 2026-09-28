@@ -14,6 +14,10 @@ SITE_NAMES = {
     "threads": "Threads", "tiktok": "TikTok", "twitter": "X", "youtube": "YouTube",
 }
 OTHER_SITE_ID = "ytdlp"
+IGNORED_HOSTS = (
+    "t.me", "telegram.me", "telegram.dog", "telegram.org",
+    "telegra.ph", "graph.org", "telesco.pe",
+)
 PUBLIC_GROUP_SITE_NAMES = {
     **SITE_NAMES,
     "kika": "KiKA",
@@ -106,8 +110,10 @@ def identify(url: str) -> Request | None:
     try:
         url = url.strip()
         parsed = urlsplit(url)
-        host = (parsed.hostname or "").lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
         if parsed.scheme not in {"http", "https"} or not host or len(url) > 4096:
+            return None
+        if _host_matches(host, *IGNORED_HOSTS):
             return None
         if parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
             return None

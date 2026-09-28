@@ -198,6 +198,8 @@ async def test_non_media_links_leave_no_bot_reply() -> None:
     bot.runner = Runner()
     await bot.on_message(None, Message("https://x.com/username"))
     assert replies == []
+    await bot.on_message(None, Message("https://t.me/example/123"))
+    assert replies == []
     await bot.on_message(None, Message("https://www.reddit.com/gallery/abc123"))
     assert replies == ["Queued…", "deleted"]
 

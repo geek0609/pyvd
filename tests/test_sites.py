@@ -64,6 +64,19 @@ def test_rejects_unrelated_or_local_urls() -> None:
     assert first_supported_url("hello https://www.instagram.com/p/Cabc123/ nice")
 
 
+def test_telegram_links_are_ignored_before_extractor_matching() -> None:
+    for host in (
+        "t.me", "telegram.me", "telegram.dog", "telegram.org",
+        "web.telegram.org", "telegra.ph", "graph.org", "telesco.pe",
+    ):
+        assert identify(f"https://{host}/example/123") is None, host
+    assert identify("https://T.ME./example/123") is None
+    assert first_supported_url("https://t.me/example/123") is None
+    assert first_supported_url(
+        "https://t.me/example/123 https://youtu.be/YE7VzlLtp-4"
+    ).content_id == "YE7VzlLtp-4"
+
+
 def test_known_sites_require_a_media_post_or_short_link() -> None:
     for url in (
         "https://www.youtube.com/", "https://www.youtube.com/@channel",
