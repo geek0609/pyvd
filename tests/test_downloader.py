@@ -3,9 +3,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from internal.core.errors import FileTooLarge
+from internal.core.errors import AuthenticationRequired, FileTooLarge, NoMedia
 from internal.extractors import downloader
 from internal.extractors.sites import Request
+from internal.models.media import Media
 
 
 def _settings(tmp_path: Path) -> SimpleNamespace:
@@ -98,3 +99,27 @@ def test_additional_site_uses_its_own_cookie_file(tmp_path: Path, monkeypatch: p
     )
     assert Path(captured["cookiefile"]).read_bytes() == original.read_bytes()
     assert Path(captured["cookiefile"]) != original
+
+
+@pytest.mark.asyncio
+async def test_instagram_auth_error_survives_failed_ytdlp_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = Request("instagram", "reel", "https://www.instagram.com/reel/reel/")
+    auth_error = AuthenticationRequired("Refresh the Instagram cookies.")
+
+    async def gallery(*args):
+        raise auth_error
+
+    def ytdlp(*args):
+        raise NoMedia("Could not download media from this link.")
+
+    monkeypatch.setattr(downloader, "download_gallery", gallery)
+    monkeypatch.setattr(downloader, "_download_in_process", ytdlp)
+    with pytest.raises(AuthenticationRequired) as exc:
+        await downloader.download(request, _settings(tmp_path), tmp_path)
+    assert exc.value is auth_error
+
+    media = Media("instagram", "reel", request.url)
+    monkeypatch.setattr(downloader, "_download_in_process", lambda *args: media)
+    assert await downloader.download(request, _settings(tmp_path), tmp_path) is media

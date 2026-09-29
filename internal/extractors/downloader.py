@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from internal.config.settings import Settings
-from internal.core.errors import DurationTooLong, FileTooLarge, MediaError, NoMedia
+from internal.core.errors import AuthenticationRequired, DurationTooLong, FileTooLarge, MediaError, NoMedia
 from internal.extractors.cookies import job_cookie_file
 from internal.extractors.gallery import download_gallery, prefer_gallery
 from internal.extractors.sites import Request
@@ -181,9 +181,17 @@ def _download_in_process(request: Request, settings: Settings, workdir: Path) ->
 
 
 async def download(request: Request, settings: Settings, workdir: Path) -> Media:
+    auth_error: AuthenticationRequired | None = None
     if prefer_gallery(request):
         try:
             return await download_gallery(request, settings, workdir)
+        except AuthenticationRequired as exc:
+            auth_error = exc
         except NoMedia:
             pass
-    return await asyncio.to_thread(_download_in_process, request, settings, workdir)
+    try:
+        return await asyncio.to_thread(_download_in_process, request, settings, workdir)
+    except NoMedia:
+        if auth_error is not None:
+            raise auth_error
+        raise

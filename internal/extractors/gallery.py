@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from internal.config.settings import Settings
-from internal.core.errors import FileTooLarge, MediaError, NoMedia
+from internal.core.errors import AuthenticationRequired, FileTooLarge, MediaError, NoMedia
 from internal.extractors.cookies import job_cookie_file
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
@@ -93,7 +93,7 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
         command.extend(["--cookies", str(cookie)])
     command.append(request.url)
     process = await asyncio.create_subprocess_exec(
-        *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
     )
     output_task = asyncio.create_task(process.communicate())
     try:
@@ -111,13 +111,17 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
                 process.kill()
                 await output_task
                 raise NoMedia("Not enough free disk space for this download.")
-        await output_task
+        _, stderr = await output_task
     finally:
         if process.returncode is None:
             process.kill()
             await process.wait()
     paths = files_in(gallery_dir)
     if not paths:
+        if request.extractor_id == "instagram" and b"redirect to login page" in stderr.lower():
+            raise AuthenticationRequired(
+                "Instagram redirected PyVD to login. Refresh the Instagram cookies."
+            )
         raise NoMedia("No media was found by the gallery extractor.")
     if len(paths) > 20:
         raise MediaError("The post contains more than 20 media items.")

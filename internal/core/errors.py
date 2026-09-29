@@ -12,3 +12,7 @@ class DurationTooLong(MediaError):
 
 class NoMedia(MediaError):
     pass
+
+
+class AuthenticationRequired(NoMedia):
+    pass
