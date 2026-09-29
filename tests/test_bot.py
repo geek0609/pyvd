@@ -156,7 +156,7 @@ async def test_plain_links_download_in_dm_and_private_group(
 
 
 @pytest.mark.asyncio
-async def test_non_media_links_leave_no_bot_reply() -> None:
+async def test_ignored_links_stay_silent_but_extractor_errors_reply() -> None:
     replies = []
 
     class Message:
@@ -186,7 +186,7 @@ async def test_non_media_links_leave_no_bot_reply() -> None:
     await bot.on_message(None, Message("https://t.me/example/123"))
     assert replies == []
     await bot.on_message(None, Message("https://www.reddit.com/gallery/abc123"))
-    assert replies == []
+    assert replies == ["⚠️ No media was found at this link."]
 
 
 @pytest.mark.asyncio
