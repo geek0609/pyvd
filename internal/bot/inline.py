@@ -12,7 +12,7 @@ from hydrogram import Client, enums, types
 from internal.config.settings import Settings
 from internal.core.errors import MediaError
 from internal.core.send import format_caption
-from internal.core.tasks import JobRunner, check_group_nsfw, stale_youtube_cache
+from internal.core.tasks import JobRunner, check_group_nsfw, stale_video_cache
 from internal.database.store import Store
 from internal.extractors.sites import (
     OTHER_SITE_ID, SITE_NAMES, Request, allowed_in_public_group, first_supported_url,
@@ -149,7 +149,7 @@ class Inline:
             chat = await self.store.chat(user_id, "private")
             if self.settings.caching:
                 cached = await self.store.cached_media(request.extractor_id, request.content_id)
-                if cached and len(cached.items) == 1 and not stale_youtube_cache(cached):
+                if cached and len(cached.items) == 1 and not stale_video_cache(cached):
                     cached.url = request.url
                     check_group_nsfw(cached, chat, pending.public_group)
                     try:

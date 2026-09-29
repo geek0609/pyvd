@@ -32,6 +32,7 @@ async def test_instagram_login_redirect_is_reported(tmp_path: Path, monkeypatch)
             return b"", b"[instagram][error] HTTP redirect to login page"
 
     async def start(*args, **kwargs):
+        assert "extractor.instagram.videos=merged" in args
         return Process()
 
     monkeypatch.setattr("internal.extractors.gallery.asyncio.create_subprocess_exec", start)

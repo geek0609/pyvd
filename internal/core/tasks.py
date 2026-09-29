@@ -26,8 +26,8 @@ class Delivery:
     messages: list[types.Message]
 
 
-def stale_youtube_cache(media: Media) -> bool:
-    return media.extractor_id == "youtube" and any(
+def stale_video_cache(media: Media) -> bool:
+    return media.extractor_id in {"youtube", "instagram"} and any(
         item.kind == "video" and item.delivery_kind == "document" for item in media.items
     )
 
@@ -166,7 +166,7 @@ class JobRunner:
             raise MediaError("This link is ignored by the site configuration.")
         async with self._lock(request.key), self.capacity:
             cached = await self.store.cached_media(request.extractor_id, request.content_id) if self.settings.caching else None
-            if cached and stale_youtube_cache(cached):
+            if cached and stale_video_cache(cached):
                 cached = None
             if cached and (not inline or len(cached.items) == 1):
                 if marked_nsfw and not cached.nsfw:

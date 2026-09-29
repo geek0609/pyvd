@@ -86,6 +86,8 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
         "--destination", str(gallery_dir), "--range", "1-21",
         "--filesize-max", str(settings.max_file_size), "--write-metadata",
     ]
+    if request.extractor_id == "instagram":
+        command.extend(["-o", "extractor.instagram.videos=merged"])
     proxy = site.download_proxy or site.proxy or settings.proxy
     if proxy and not site.disable_proxy:
         command.extend(["--proxy", proxy])
