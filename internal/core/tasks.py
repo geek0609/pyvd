@@ -93,7 +93,7 @@ class JobRunner:
 
     async def run_music(
         self, video: types.Video | types.Document, chat: ChatSettings,
-        target_chat_id: int, reply_to: int, status: types.Message,
+        target_chat_id: int, reply_to: int, status: types.Message | None,
     ) -> None:
         if video.file_size and video.file_size > self.settings.max_file_size:
             raise FileTooLarge("The file exceeds the 2 GB limit.")

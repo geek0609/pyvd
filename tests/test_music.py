@@ -28,13 +28,9 @@ def test_replied_video_accepts_only_pyvd_video() -> None:
 
 
 @pytest.mark.asyncio
-async def test_music_command_routes_reply_and_removes_status() -> None:
+async def test_music_command_sends_audio_without_temporary_status() -> None:
     events = []
     video = SimpleNamespace(file_id="video")
-
-    class Status:
-        async def delete(self):
-            events.append("deleted")
 
     class Message:
         text = "/music"
@@ -46,8 +42,7 @@ async def test_music_command_routes_reply_and_removes_status() -> None:
         id = 6
 
         async def reply(self, text, **kwargs):
-            assert text == "Queued…"
-            return Status()
+            raise AssertionError("successful /music must not send a status message")
 
     class Store:
         async def chat(self, chat_id, kind):
@@ -56,22 +51,19 @@ async def test_music_command_routes_reply_and_removes_status() -> None:
     class Runner:
         async def run_music(self, source, chat, chat_id, reply_to, status):
             assert (source, chat.chat_id, chat_id, reply_to) == (video, 123, 123, 6)
+            assert status is None
             events.append("sent")
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
     bot.bot_id = 42
     bot.runner = Runner()
     await bot.on_message(None, Message())
-    assert events == ["sent", "deleted"]
+    assert events == ["sent"]
 
 
 @pytest.mark.asyncio
 async def test_public_group_music_rejects_spoilered_video() -> None:
     replies = []
-
-    class Status:
-        async def edit_text(self, text, **kwargs):
-            replies.append(text)
 
     class Message:
         text = "/music"
@@ -85,7 +77,7 @@ async def test_public_group_music_rejects_spoilered_video() -> None:
         id = 6
 
         async def reply(self, text, **kwargs):
-            return Status()
+            replies.append(text)
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), SimpleNamespace())
     bot.bot_id = 42
@@ -99,10 +91,6 @@ async def test_public_group_music_rejects_spoilered_video() -> None:
 async def test_group_music_rejects_cached_nsfw_video_when_disabled() -> None:
     replies = []
 
-    class Status:
-        async def edit_text(self, text, **kwargs):
-            replies.append(text)
-
     class Message:
         text = "/music"
         date = datetime.now(timezone.utc)
@@ -114,7 +102,7 @@ async def test_group_music_rejects_cached_nsfw_video_when_disabled() -> None:
         id = 6
 
         async def reply(self, text, **kwargs):
-            return Status()
+            replies.append(text)
 
     class Store:
         async def chat(self, chat_id, kind):

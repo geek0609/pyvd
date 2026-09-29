@@ -6,7 +6,7 @@ from hydrogram import enums
 
 from internal.bot.main import Bot, allowed, bot_commands, chat_kind, help_text
 from internal.bot.chat import is_public_group
-from internal.core.errors import NoMedia
+from internal.core.errors import MediaError, NoMedia
 from internal.models.media import ChatSettings
 from internal.networking.proxy import hydrogram_proxy
 
@@ -86,10 +86,6 @@ async def test_public_group_handles_plain_links_without_commands(
 ) -> None:
     calls = []
 
-    class Status:
-        async def delete(self):
-            pass
-
     class Message:
         date = datetime.now(timezone.utc)
         chat = SimpleNamespace(id=-100, type=enums.ChatType.SUPERGROUP, username="publicgroup")
@@ -100,7 +96,7 @@ async def test_public_group_handles_plain_links_without_commands(
             self.text = text
 
         async def reply(self, text, **kwargs):
-            return Status()
+            raise AssertionError("plain links must not send a status message")
 
     class Store:
         async def chat(self, chat_id, kind):
@@ -108,6 +104,7 @@ async def test_public_group_handles_plain_links_without_commands(
 
     class Runner:
         async def run(self, request, chat, target_chat_id, **kwargs):
+            assert "status" not in kwargs
             calls.append((
                 request.extractor_id, kwargs["public_group"],
                 kwargs["marked_nsfw"], kwargs["spoiler"],
@@ -133,10 +130,6 @@ async def test_plain_links_download_in_dm_and_private_group(
 ) -> None:
     calls = []
 
-    class Status:
-        async def delete(self):
-            pass
-
     class Message:
         text = "https://vimeo.com/123456"
         date = datetime.now(timezone.utc)
@@ -145,7 +138,7 @@ async def test_plain_links_download_in_dm_and_private_group(
         id = 10
 
         async def reply(self, text, **kwargs):
-            return Status()
+            raise AssertionError("plain links must not send a status message")
 
     class Store:
         async def chat(self, chat_id, requested_kind):
@@ -166,13 +159,6 @@ async def test_plain_links_download_in_dm_and_private_group(
 async def test_non_media_links_leave_no_bot_reply() -> None:
     replies = []
 
-    class Status:
-        async def delete(self):
-            replies.append("deleted")
-
-        async def edit_text(self, text, **kwargs):
-            replies.append(text)
-
     class Message:
         date = datetime.now(timezone.utc)
         chat = SimpleNamespace(id=-100, type=enums.ChatType.SUPERGROUP, username="publicgroup")
@@ -184,7 +170,6 @@ async def test_non_media_links_leave_no_bot_reply() -> None:
 
         async def reply(self, text, **kwargs):
             replies.append(text)
-            return Status()
 
     class Store:
         async def chat(self, chat_id, kind):
@@ -201,7 +186,35 @@ async def test_non_media_links_leave_no_bot_reply() -> None:
     await bot.on_message(None, Message("https://t.me/example/123"))
     assert replies == []
     await bot.on_message(None, Message("https://www.reddit.com/gallery/abc123"))
-    assert replies == ["Queued…", "deleted"]
+    assert replies == []
+
+
+@pytest.mark.asyncio
+async def test_download_error_sends_one_reply_without_temporary_status() -> None:
+    replies = []
+
+    class Message:
+        text = "https://youtu.be/YE7VzlLtp-4"
+        date = datetime.now(timezone.utc)
+        chat = SimpleNamespace(id=123, type=enums.ChatType.PRIVATE)
+        from_user = SimpleNamespace(id=7)
+        id = 10
+
+        async def reply(self, text, **kwargs):
+            replies.append(text)
+
+    class Store:
+        async def chat(self, chat_id, kind):
+            return ChatSettings(chat_id, kind, True, False, False, 10, False)
+
+    class Runner:
+        async def run(self, *args, **kwargs):
+            raise MediaError("The file exceeds the 2 GB limit.")
+
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
+    bot.runner = Runner()
+    await bot.on_message(None, Message())
+    assert replies == ["⚠️ The file exceeds the 2 GB limit."]
 
 
 @pytest.mark.asyncio

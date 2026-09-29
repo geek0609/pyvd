@@ -198,7 +198,6 @@ class Bot:
             await show_settings(self.client, self.store, message)
             return
         if command == "/music":
-            status = await message.reply("Queued…", parse_mode=enums.ParseMode.DISABLED)
             try:
                 replied = message.reply_to_message
                 if replied is None and message.reply_to_message_id:
@@ -222,13 +221,12 @@ class Bot:
                             "Audio from marked videos is unavailable here. "
                             "Use a DM or private group."
                         )
-                await self.runner.run_music(video, chat, message.chat.id, message.id, status)
-                await status.delete()
+                await self.runner.run_music(video, chat, message.chat.id, message.id, None)
             except MediaError as exc:
-                await status.edit_text(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
+                await message.reply(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
             except Exception:
                 try:
-                    await status.edit_text(
+                    await message.reply(
                         "⚠️ Audio extraction failed. Please try again later.",
                         parse_mode=enums.ParseMode.DISABLED,
                     )
@@ -246,26 +244,24 @@ class Bot:
         chat = await self.store.chat(message.chat.id, kind)
         if self.runner is None:
             raise RuntimeError("bot is not started")
-        status = await message.reply("Queued…", parse_mode=enums.ParseMode.DISABLED)
         try:
             await self.runner.run(
                 request, chat, message.chat.id, reply_to=message.id,
                 spoiler="spoiler" in tags, marked_nsfw="nsfw" in tags,
-                status=status, public_group=public_group,
+                public_group=public_group,
             )
-            await status.delete()
             if kind == "group" and chat.delete_links:
                 try:
                     await message.delete()
                 except Exception:
                     pass
         except NoMedia:
-            await status.delete()
+            pass
         except MediaError as exc:
-            await status.edit_text(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
+            await message.reply(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
         except Exception:
             try:
-                await status.edit_text(
+                await message.reply(
                     "⚠️ Download failed. Please try again later.",
                     parse_mode=enums.ParseMode.DISABLED,
                 )
