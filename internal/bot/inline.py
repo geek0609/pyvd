@@ -10,7 +10,7 @@ from urllib.request import Request as HttpRequest, urlopen
 from hydrogram import Client, enums, types
 
 from internal.config.settings import Settings
-from internal.core.errors import MediaError
+from internal.core.errors import MediaError, NoAttachments
 from internal.core.send import format_caption
 from internal.core.tasks import JobRunner, check_group_nsfw, stale_video_cache
 from internal.database.store import Store
@@ -170,6 +170,14 @@ class Inline:
                 delivery.media.items[0],
                 format_caption(delivery.media, chat, self.settings, self.username),
             )
+        except NoAttachments:
+            try:
+                await self.client.edit_inline_text(
+                    inline_message_id, "This post has no attached media.",
+                    parse_mode=enums.ParseMode.DISABLED,
+                )
+            except Exception:
+                pass
         except Exception:
             try:
                 await self.client.edit_inline_text(

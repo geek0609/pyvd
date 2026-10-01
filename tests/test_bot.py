@@ -6,7 +6,7 @@ from hydrogram import enums
 
 from internal.bot.main import Bot, allowed, bot_commands, chat_kind, help_text
 from internal.bot.chat import is_public_group
-from internal.core.errors import MediaError, NoMedia
+from internal.core.errors import AuthenticationRequired, MediaError, NoAttachments, NoMedia
 from internal.models.media import ChatSettings
 from internal.networking.proxy import hydrogram_proxy
 
@@ -215,6 +215,48 @@ async def test_download_error_sends_one_reply_without_temporary_status() -> None
     bot.runner = Runner()
     await bot.on_message(None, Message())
     assert replies == ["⚠️ The file exceeds the 2 GB limit."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chat_type", "username"),
+    [
+        (enums.ChatType.PRIVATE, None),
+        (enums.ChatType.SUPERGROUP, None),
+        (enums.ChatType.SUPERGROUP, "publicgroup"),
+    ],
+)
+@pytest.mark.parametrize(
+    "error", [NoAttachments("No attachments"), NoMedia("Fetch failed"), AuthenticationRequired("Login required")],
+)
+async def test_text_only_posts_are_ignored_but_failures_reply(chat_type, username, error) -> None:
+    replies = []
+
+    class Message:
+        text = "https://x.com/zhangqiaorjc/status/2105509406058463657"
+        date = datetime.now(timezone.utc)
+        chat = SimpleNamespace(id=123, type=chat_type, username=username)
+        from_user = SimpleNamespace(id=7)
+        id = 10
+
+        async def reply(self, text, **kwargs):
+            replies.append(text)
+
+        async def delete(self):
+            raise AssertionError("a text-only or failed source link must not be deleted")
+
+    class Store:
+        async def chat(self, chat_id, kind):
+            return ChatSettings(chat_id, kind, True, False, False, 10, True)
+
+    class Runner:
+        async def run(self, *args, **kwargs):
+            raise error
+
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
+    bot.runner = Runner()
+    await bot.on_message(None, Message())
+    assert replies == ([] if isinstance(error, NoAttachments) else [f"⚠️ {error}"])
 
 
 @pytest.mark.asyncio

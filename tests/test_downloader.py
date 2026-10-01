@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from internal.core.errors import AuthenticationRequired, FileTooLarge, NoMedia
+from internal.core.errors import AuthenticationRequired, FileTooLarge, NoAttachments, NoMedia
 from internal.extractors import downloader
 from internal.extractors.sites import Request
 from internal.models.media import Media
@@ -122,4 +122,38 @@ async def test_instagram_auth_error_survives_failed_ytdlp_fallback(
 
     media = Media("instagram", "reel", request.url)
     monkeypatch.setattr(downloader, "_download_in_process", lambda *args: media)
+    assert await downloader.download(request, _settings(tmp_path), tmp_path) is media
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", ["photo", "text", "error"])
+async def test_twitter_no_video_uses_gallery_without_hiding_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result: str,
+) -> None:
+    request = Request("twitter", "123", "https://x.com/user/status/123")
+    media = Media("twitter", "123", request.url)
+    error = NoAttachments("No attachments") if result == "text" else NoMedia("Fetch failed")
+
+    def ytdlp(*args):
+        raise NoMedia("No video found")
+
+    async def gallery(*args):
+        if result == "photo":
+            return media
+        raise error
+
+    monkeypatch.setattr(downloader, "_download_in_process", ytdlp)
+    monkeypatch.setattr(downloader, "download_gallery", gallery)
+    if result == "photo":
+        assert await downloader.download(request, _settings(tmp_path), tmp_path) is media
+    else:
+        with pytest.raises(type(error)) as exc:
+            await downloader.download(request, _settings(tmp_path), tmp_path)
+        assert exc.value is error
+
+    async def unexpected_gallery(*args):
+        raise AssertionError("successful videos must not use the fallback")
+
+    monkeypatch.setattr(downloader, "_download_in_process", lambda *args: media)
+    monkeypatch.setattr(downloader, "download_gallery", unexpected_gallery)
     assert await downloader.download(request, _settings(tmp_path), tmp_path) is media

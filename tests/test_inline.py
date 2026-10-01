@@ -7,6 +7,7 @@ from hydrogram import enums
 
 from internal.bot.inline import Inline, _edit_media
 from internal.bot.main import Bot
+from internal.core.errors import NoAttachments
 from internal.extractors.sites import Request
 from internal.models.media import ChatSettings, Media, MediaItem
 
@@ -187,3 +188,28 @@ async def test_group_inline_cannot_reuse_cached_marked_media() -> None:
     assert edits == [
         "⚠️ This link is unavailable here. Send it to PyVD in a DM or private group."
     ]
+
+
+@pytest.mark.asyncio
+async def test_inline_text_post_finishes_without_an_error() -> None:
+    edits = []
+
+    class Client:
+        async def edit_inline_text(self, message_id, text, **kwargs):
+            edits.append(text)
+
+    class Store:
+        async def chat(self, chat_id, kind):
+            return ChatSettings(chat_id, kind, True, False, False, 10, False)
+
+    class Runner:
+        async def run(self, *args, **kwargs):
+            raise NoAttachments("This post has no attached media.")
+
+    client = Client()
+    inline = Inline(client, SimpleNamespace(caching=False), Store())
+    inline.runner = Runner()
+    task_id = inline.add(123, Request("twitter", "123", "https://x.com/user/status/123"))
+    chosen = SimpleNamespace(result_id=task_id, from_user=SimpleNamespace(id=123), inline_message_id="message")
+    await inline.chosen(client, chosen)
+    assert edits == ["This post has no attached media."]

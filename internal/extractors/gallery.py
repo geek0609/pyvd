@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from internal.config.settings import Settings
-from internal.core.errors import AuthenticationRequired, FileTooLarge, MediaError, NoMedia
+from internal.core.errors import AuthenticationRequired, FileTooLarge, MediaError, NoAttachments, NoMedia
 from internal.extractors.cookies import job_cookie_file
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
@@ -39,7 +39,7 @@ def _caption(directory: Path) -> str:
         except (OSError, ValueError):
             continue
         if isinstance(info, dict):
-            for key in ("description", "caption", "title"):
+            for key in ("description", "caption", "title", "content"):
                 value = info.get(key)
                 if isinstance(value, str) and value.strip():
                     return value
@@ -74,6 +74,22 @@ def _marked_nsfw(directory: Path) -> bool:
     return False
 
 
+def _text_only_tweet(directory: Path, content_id: str) -> bool:
+    posts: dict[str, dict] = {}
+    for path in directory.rglob("*.post.json"):
+        try:
+            info = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return False
+        if not isinstance(info, dict) or type(info.get("count")) is not int or info["count"] != 0:
+            return False
+        posts[str(info.get("tweet_id"))] = info
+    return content_id in posts and all(
+        not info.get("quoted_id") or str(info["quoted_id"]) in posts
+        for info in posts.values()
+    )
+
+
 async def download_gallery(request: Request, settings: Settings, workdir: Path) -> Media:
     site = settings.site(request.extractor_id)
     if site.edge_proxy:
@@ -84,8 +100,19 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
     command = [
         sys.executable, "-m", "gallery_dl", "--config-ignore", "--quiet",
         "--destination", str(gallery_dir), "--range", "1-21",
-        "--filesize-max", str(settings.max_file_size), "--write-metadata",
+        "--filesize-max", str(settings.max_file_size),
     ]
+    if request.extractor_id == "twitter":
+        command.extend([
+            "-o", "extractor.twitter.text-tweets=true",
+            "-o", "extractor.twitter.quoted=true",
+            "-o", "extractor.twitter.tweet-endpoint=rest",
+            "-o", "extractor.twitter.cards=true",
+            "-o", 'extractor.twitter.cards-blacklist=["summary","summary_large_image"]',
+            "-P", "metadata@post", "-O", "filename={tweet_id}.post.json",
+        ])
+    else:
+        command.append("--write-metadata")
     if request.extractor_id == "instagram":
         command.extend(["-o", "extractor.instagram.videos=merged"])
     proxy = site.download_proxy or site.proxy or settings.proxy
@@ -124,6 +151,11 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
             raise AuthenticationRequired(
                 "Instagram redirected PyVD to login. Refresh the Instagram cookies."
             )
+        if (
+            request.extractor_id == "twitter" and process.returncode == 0 and not stderr.strip()
+            and _text_only_tweet(gallery_dir, request.content_id)
+        ):
+            raise NoAttachments("This post has no attached media.")
         raise NoMedia("No media was found by the gallery extractor.")
     if len(paths) > 20:
         raise MediaError("The post contains more than 20 media items.")

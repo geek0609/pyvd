@@ -194,4 +194,6 @@ async def download(request: Request, settings: Settings, workdir: Path) -> Media
     except NoMedia:
         if auth_error is not None:
             raise auth_error
+        if request.extractor_id == "twitter":
+            return await download_gallery(request, settings, workdir)
         raise

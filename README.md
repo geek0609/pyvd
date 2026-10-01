@@ -79,6 +79,8 @@ Send a supported link in a private chat or group. `/start` introduces the bot,
 `/help` shows current usage, and `/extractors <name>` searches sites. These
 commands and `/music` appear in the Telegram command menu; groups also show
 `/settings`.
+Confirmed text-only X posts are ignored; download and authentication failures
+still receive an error reply. Photo-only X posts use the gallery extractor.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music
 message. AAC and MP3 tracks keep their original quality; other audio tracks
 are converted to MP3. The same file size and duration limits apply.
