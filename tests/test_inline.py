@@ -1,6 +1,9 @@
+import asyncio
 import json
+import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from hydrogram import enums
@@ -8,8 +11,13 @@ from hydrogram import enums
 from internal.bot.inline import Inline, _edit_media
 from internal.bot.main import Bot
 from internal.core.errors import NoAttachments
+from internal.core.tasks import Delivery
 from internal.extractors.sites import Request
 from internal.models.media import ChatSettings, Media, MediaItem
+
+
+async def drain_inline(inline: Inline) -> None:
+    await asyncio.gather(*list(inline.tasks))
 
 
 def test_inline_video_edit_uses_uploaded_video_file_id(monkeypatch) -> None:
@@ -128,6 +136,8 @@ async def test_inline_download_button_starts_without_chosen_feedback() -> None:
             events.append(("answer", text))
 
     await bot.on_callback(None, Callback())
+    assert events == [("answer", "Downloading media…")]
+    await drain_inline(bot.inline)
     assert events == [
         ("answer", "Downloading media…"),
         ("id", 123, "inline-message"),
@@ -185,6 +195,7 @@ async def test_group_inline_cannot_reuse_cached_marked_media() -> None:
         result_id=task_id, from_user=SimpleNamespace(id=123), inline_message_id="message",
     )
     await inline.chosen(client, chosen)
+    await drain_inline(inline)
     assert edits == [
         "⚠️ This link is unavailable here. Send it to PyVD in a DM or private group."
     ]
@@ -212,4 +223,139 @@ async def test_inline_text_post_finishes_without_an_error() -> None:
     task_id = inline.add(123, Request("twitter", "123", "https://x.com/user/status/123"))
     chosen = SimpleNamespace(result_id=task_id, from_user=SimpleNamespace(id=123), inline_message_id="message")
     await inline.chosen(client, chosen)
+    await drain_inline(inline)
     assert edits == ["This post has no attached media."]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", ["chosen", "callback"])
+async def test_inline_handlers_return_while_delivery_is_running(handler) -> None:
+    inline = Inline(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    deliveries = []
+
+    async def deliver(pending, user_id, message_id):
+        deliveries.append((pending.request.content_id, user_id, message_id))
+        started.set()
+        await finish.wait()
+
+    inline._deliver = deliver
+    task_id = inline.add(123, Request("youtube", "id", "https://youtu.be/id"))
+    query = SimpleNamespace(
+        result_id=task_id, data=f"inline:download:{task_id}",
+        inline_message_id="message", from_user=SimpleNamespace(id=123),
+        answer=AsyncMock(),
+    )
+    try:
+        if handler == "chosen":
+            await asyncio.wait_for(inline.chosen(None, query), 1)
+        else:
+            assert await asyncio.wait_for(inline.callback(query), 1)
+        await asyncio.wait_for(started.wait(), 1)
+        assert len(inline.tasks) == 1
+        assert task_id not in inline.pending
+        assert not next(iter(inline.tasks)).done()
+        await inline.chosen(None, query)
+        assert deliveries == [("id", 123, "message")]
+        finish.set()
+        await drain_inline(inline)
+        assert not inline.tasks
+        assert not inline._expirations
+    finally:
+        await inline.close()
+
+
+@pytest.mark.asyncio
+async def test_inline_close_cancels_running_delivery_and_clears_selections() -> None:
+    inline = Inline(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    async def deliver(*args):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cleaned.set()
+
+    inline._deliver = deliver
+    task_id = inline.add(123, Request("youtube", "id", "https://youtu.be/id"))
+    chosen = SimpleNamespace(
+        result_id=task_id, inline_message_id="message", from_user=SimpleNamespace(id=123),
+    )
+    await inline.chosen(None, chosen)
+    await asyncio.wait_for(started.wait(), 1)
+    task = next(iter(inline.tasks))
+    unselected = inline.add(123, Request("youtube", "other", "https://youtu.be/other"))
+    expiration = inline._expirations[unselected]
+    await inline.close()
+    assert task.cancelled()
+    assert cleaned.is_set()
+    assert not inline.tasks
+    assert not inline.pending
+    assert not inline._expirations
+    assert expiration.cancelled()
+    await inline.chosen(None, chosen)
+    assert not inline.tasks
+    with pytest.raises(RuntimeError, match="closed"):
+        inline.add(123, Request("youtube", "id", "https://youtu.be/id"))
+    await inline.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [False, True])
+async def test_inline_close_waits_for_media_edit_before_removing_staged_uploads(
+    monkeypatch, cached,
+) -> None:
+    events = []
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    media = Media(
+        "youtube", "id", "https://youtu.be/id",
+        items=[MediaItem(kind="video", file_id="cached-id", video_codec="avc")],
+    )
+    message = SimpleNamespace(delete=AsyncMock(side_effect=lambda: events.append("deleted")))
+    store = SimpleNamespace(
+        chat=AsyncMock(return_value=ChatSettings(123, "private", False, False, False, 10, False)),
+        cached_media=AsyncMock(return_value=media),
+    )
+    inline = Inline(SimpleNamespace(), SimpleNamespace(
+        caching=cached, bot_token="test-token", captions_header="source",
+    ), store)
+    inline.runner = SimpleNamespace(run=AsyncMock(return_value=Delivery(media, [message])))
+
+    def edit(*args):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "test did not release the media edit"
+        events.append("edited")
+
+    monkeypatch.setattr("internal.bot.inline._edit_media", edit)
+    task_id = inline.add(123, Request("youtube", "id", "https://youtu.be/id"))
+    chosen = SimpleNamespace(
+        result_id=task_id, inline_message_id="message", from_user=SimpleNamespace(id=123),
+    )
+    closing = None
+    try:
+        await inline.chosen(None, chosen)
+        await asyncio.wait_for(started.wait(), 1)
+        closing = asyncio.create_task(inline.close())
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not closing.done()
+        assert events == []
+        release.set()
+        await asyncio.wait_for(closing, 1)
+    finally:
+        release.set()
+        if closing is not None:
+            await closing
+        else:
+            await inline.close()
+    assert events == (["edited"] if cached else ["edited", "deleted"])
+    assert not inline.tasks
+    if cached:
+        inline.runner.run.assert_not_awaited()
+    else:
+        message.delete.assert_awaited_once()

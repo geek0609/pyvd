@@ -13,6 +13,7 @@ from internal.bot.settings import handle_callback, show_settings
 from internal.bot.inline import Inline
 from internal.core.errors import MediaError, NoAttachments
 from internal.core.tasks import JobRunner
+from internal.core.queue import JobCancelled
 from internal.database.store import Store
 from internal.extractors.sites import PUBLIC_GROUP_SITE_NAMES, SITE_NAMES, first_supported_url, search_extractors
 from internal.networking.proxy import hydrogram_proxy
@@ -27,6 +28,7 @@ def help_text(kind: str, public_group: bool = False) -> str:
         "Use /extractors <name> to search supported sites.",
         "Reply to a video I sent with /music to receive its audio. "
         "Videos without an audio track cannot be converted.",
+        "Reply to your link or /music request with /cancel to stop a queued or running download.",
         "Use #skip to ignore a link, #spoiler to hide media, or #nsfw to mark it.",
     ]
     if kind == "group":
@@ -49,6 +51,7 @@ def bot_commands(group: bool) -> list[types.BotCommand]:
         types.BotCommand("help", "How to use PyVD"),
         types.BotCommand("extractors", "Search supported sites"),
         types.BotCommand("music", "Extract audio from a PyVD video"),
+        types.BotCommand("cancel", "Cancel your download by replying to its request"),
     ]
     if group:
         commands.append(types.BotCommand("settings", "Configure this group"))
@@ -90,6 +93,7 @@ class Bot:
         self.inline = Inline(client, settings, store)
         self.username = ""
         self.bot_id = 0
+        self.job_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         me = await self.client.get_me()
@@ -197,41 +201,20 @@ class Bot:
         if command == "/settings":
             await show_settings(self.client, self.store, message)
             return
+        if command == "/cancel":
+            original = getattr(message, "reply_to_message_id", None)
+            if original is None:
+                original = getattr(getattr(message, "reply_to_message", None), "id", None)
+            if original is None:
+                reply = "Reply to your link or /music request with /cancel."
+            elif self.runner and self.runner.jobs.cancel(message.chat.id, original, user_id):
+                reply = "Cancelling your download."
+            else:
+                reply = "No active download of yours was found for that message."
+            await message.reply(reply, parse_mode=enums.ParseMode.DISABLED)
+            return
         if command == "/music":
-            try:
-                replied = message.reply_to_message
-                if replied is None and message.reply_to_message_id:
-                    replied = await self.client.get_messages(
-                        message.chat.id, message.reply_to_message_id,
-                    )
-                video = replied_video(replied, self.bot_id)
-                if public_group and getattr(replied, "has_media_spoiler", False):
-                    raise MediaError(
-                        "Audio from spoilered videos is unavailable here. "
-                        "Use a DM or private group."
-                    )
-                if self.runner is None:
-                    raise RuntimeError("bot is not started")
-                chat = await self.store.chat(message.chat.id, kind)
-                if kind == "group" and await self.store.is_nsfw_file(video.file_id):
-                    if not chat.nsfw:
-                        raise MediaError("Marked media is disabled in this group.")
-                    if public_group:
-                        raise MediaError(
-                            "Audio from marked videos is unavailable here. "
-                            "Use a DM or private group."
-                        )
-                await self.runner.run_music(video, chat, message.chat.id, message.id, None)
-            except MediaError as exc:
-                await message.reply(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
-            except Exception:
-                try:
-                    await message.reply(
-                        "⚠️ Audio extraction failed. Please try again later.",
-                        parse_mode=enums.ParseMode.DISABLED,
-                    )
-                except Exception:
-                    pass
+            self._start_job(message, self._music_message(message, kind, public_group))
             return
         if command:
             return
@@ -241,10 +224,73 @@ class Bot:
         request = first_supported_url(text)
         if request is None:
             return
-        chat = await self.store.chat(message.chat.id, kind)
+        self._start_job(message, self._link_message(message, request, kind, public_group, tags))
+
+    def _start_job(self, message, operation) -> None:
         if self.runner is None:
+            operation.close()
             raise RuntimeError("bot is not started")
+        user_id = message.from_user.id if message.from_user else None
+        task = self.runner.jobs.start(message.chat.id, message.id, user_id, operation)
+        self.job_tasks.add(task)
+
+        def finished(task):
+            self.job_tasks.discard(task)
+            try:
+                task.result()
+            except (JobCancelled, asyncio.CancelledError):
+                pass
+            except Exception:
+                pass
+
+        task.add_done_callback(finished)
+
+    async def close(self) -> None:
+        await self.inline.close()
+        if self.runner:
+            await self.runner.jobs.close()
+        if self.job_tasks:
+            await asyncio.gather(*self.job_tasks, return_exceptions=True)
+
+    async def _music_message(self, message, kind: str, public_group: bool) -> None:
         try:
+            replied = message.reply_to_message
+            if replied is None and message.reply_to_message_id:
+                replied = await self.client.get_messages(
+                    message.chat.id, message.reply_to_message_id,
+                )
+            video = replied_video(replied, self.bot_id)
+            if public_group and getattr(replied, "has_media_spoiler", False):
+                raise MediaError(
+                    "Audio from spoilered videos is unavailable here. "
+                    "Use a DM or private group."
+                )
+            if self.runner is None:
+                raise RuntimeError("bot is not started")
+            chat = await self.store.chat(message.chat.id, kind)
+            if kind == "group" and await self.store.is_nsfw_file(video.file_id):
+                if not chat.nsfw:
+                    raise MediaError("Marked media is disabled in this group.")
+                if public_group:
+                    raise MediaError(
+                        "Audio from marked videos is unavailable here. "
+                        "Use a DM or private group."
+                    )
+            await self.runner.run_music(video, chat, message.chat.id, message.id, None)
+        except MediaError as exc:
+            await message.reply(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
+        except Exception:
+            try:
+                await message.reply(
+                    "⚠️ Audio extraction failed. Please try again later.",
+                    parse_mode=enums.ParseMode.DISABLED,
+                )
+            except Exception:
+                pass
+
+    async def _link_message(self, message, request, kind: str, public_group: bool, tags: set[str]) -> None:
+        try:
+            chat = await self.store.chat(message.chat.id, kind)
             await self.runner.run(
                 request, chat, message.chat.id, reply_to=message.id,
                 spoiler="spoiler" in tags, marked_nsfw="nsfw" in tags,
@@ -306,6 +352,9 @@ async def run() -> None:
     try:
         async with app:
             await bot.start()
-            await idle()
+            try:
+                await idle()
+            finally:
+                await bot.close()
     finally:
         await store.close()

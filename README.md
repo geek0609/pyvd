@@ -88,8 +88,13 @@ original `bot`.
 
 Send a supported link in a private chat or group. `/start` introduces the bot,
 `/help` shows current usage, and `/extractors <name>` searches sites. These
-commands and `/music` appear in the Telegram command menu; groups also show
+commands, `/music`, and `/cancel` appear in the Telegram command menu; groups also show
 `/settings`.
+Fresh downloads run one per chat, with up to three chats downloading at once.
+Queued chats take turns; cached media bypasses the download queue. Reply to your
+link or `/music` request with `/cancel` to stop your queued or running job.
+Request ownership exists only in memory while the job runs.
+
 Confirmed text-only X posts are ignored; download and authentication failures
 still receive an error reply. Photo-only X posts use the gallery extractor.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music

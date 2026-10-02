@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -5,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from hydrogram import enums
 
+from internal.core.queue import JobRegistry
 from internal.bot.main import Bot, replied_video
 from internal.core.errors import FileTooLarge, MediaError
 from internal.core.media import extract_audio
@@ -49,6 +51,7 @@ async def test_music_command_sends_audio_without_temporary_status() -> None:
             return ChatSettings(chat_id, kind, True, False, False, 10, False)
 
     class Runner:
+        jobs = JobRegistry()
         async def run_music(self, source, chat, chat_id, reply_to, status):
             assert (source, chat.chat_id, chat_id, reply_to) == (video, 123, 123, 6)
             assert status is None
@@ -58,6 +61,8 @@ async def test_music_command_sends_audio_without_temporary_status() -> None:
     bot.bot_id = 42
     bot.runner = Runner()
     await bot.on_message(None, Message())
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert events == ["sent"]
 
 
@@ -81,7 +86,10 @@ async def test_public_group_music_rejects_spoilered_video() -> None:
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), SimpleNamespace())
     bot.bot_id = 42
+    bot.runner = SimpleNamespace(jobs=JobRegistry())
     await bot.on_message(None, Message())
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert replies == [
         "⚠️ Audio from spoilered videos is unavailable here. Use a DM or private group."
     ]
@@ -114,8 +122,10 @@ async def test_group_music_rejects_cached_nsfw_video_when_disabled() -> None:
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
     bot.bot_id = 42
-    bot.runner = SimpleNamespace()
+    bot.runner = SimpleNamespace(jobs=JobRegistry())
     await bot.on_message(None, Message())
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert replies == ["⚠️ Marked media is disabled in this group."]
 
 

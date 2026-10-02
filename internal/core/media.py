@@ -7,6 +7,7 @@ from pathlib import Path
 from internal.config.settings import Settings
 from internal.core.errors import DurationTooLong, FileTooLarge, MediaError
 from internal.models.media import Media, MediaItem
+from internal.util.process import finish_task, spawn_process, terminate_process
 
 
 CODECS = {
@@ -54,19 +55,21 @@ def _prepare_photo(item: MediaItem, settings: Settings) -> None:
 
 async def _probe(path: Path) -> dict:
     try:
-        process = await asyncio.create_subprocess_exec(
+        process = await spawn_process(
             "ffprobe", "-v", "error", "-show_streams", "-show_format",
             "-of", "json", str(path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
     except FileNotFoundError as exc:
         raise MediaError("FFmpeg and ffprobe are required to process media.") from exc
+    output_task = asyncio.create_task(process.communicate())
     try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=60)
+        stdout, _ = await asyncio.wait_for(asyncio.shield(output_task), timeout=60)
     except asyncio.TimeoutError as exc:
-        process.kill()
-        await process.wait()
         raise MediaError("Media inspection timed out.") from exc
+    finally:
+        await terminate_process(process)
+        await finish_task(output_task)
     if process.returncode:
         raise MediaError("Could not inspect the downloaded media file.")
     try:
@@ -79,16 +82,23 @@ async def _thumbnail(item: MediaItem) -> None:
     assert item.path is not None
     target = item.path.with_name(item.path.stem + "-thumb.jpg")
     try:
-        process = await asyncio.create_subprocess_exec(
+        process = await spawn_process(
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-ss", "1", "-i", str(item.path), "-frames:v", "1",
             "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
             "-q:v", "5", str(target),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.wait_for(process.wait(), timeout=60)
-    except (FileNotFoundError, asyncio.TimeoutError):
+    except FileNotFoundError:
         return
+    wait_task = asyncio.create_task(process.wait())
+    try:
+        await asyncio.wait_for(asyncio.shield(wait_task), timeout=60)
+    except asyncio.TimeoutError:
+        return
+    finally:
+        await terminate_process(process)
+        await finish_task(wait_task)
     if process.returncode == 0 and target.is_file() and target.stat().st_size < 200_000:
         item.thumbnail = target
 
@@ -117,18 +127,20 @@ async def extract_audio(source: Path, workdir: Path, settings: Settings, title: 
     ]
     command += [str(output)]
     try:
-        process = await asyncio.create_subprocess_exec(
+        process = await spawn_process(
             *command, stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
     except FileNotFoundError as exc:
         raise MediaError("FFmpeg and ffprobe are required to process media.") from exc
+    wait_task = asyncio.create_task(process.wait())
     try:
-        await asyncio.wait_for(process.wait(), timeout=max(120, duration * 2))
+        await asyncio.wait_for(asyncio.shield(wait_task), timeout=max(120, duration * 2))
     except asyncio.TimeoutError as exc:
-        process.kill()
-        await process.wait()
         raise MediaError("Audio extraction timed out.") from exc
+    finally:
+        await terminate_process(process)
+        await finish_task(wait_task)
     if process.returncode or not output.is_file():
         raise MediaError("Could not extract audio from this video.")
     size = _check_size(output, settings)
@@ -148,7 +160,15 @@ async def prepare(media: Media, settings: Settings) -> Media:
             raise MediaError("A downloaded media file is missing.")
         item.size = _check_size(item.path, settings)
         if item.kind == "photo":
-            await asyncio.to_thread(_prepare_photo, item, settings)
+            photo_task = asyncio.create_task(asyncio.to_thread(_prepare_photo, item, settings))
+            try:
+                await asyncio.shield(photo_task)
+            except asyncio.CancelledError:
+                try:
+                    await finish_task(photo_task)
+                except Exception:
+                    pass
+                raise
             continue
         info = await _probe(item.path)
         streams = info.get("streams") or []

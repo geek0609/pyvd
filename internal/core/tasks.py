@@ -12,6 +12,7 @@ from hydrogram import Client, enums, types
 from internal.config.settings import Settings
 from internal.core.errors import DurationTooLong, FileTooLarge, MediaError
 from internal.core.media import extract_audio, prepare
+from internal.core.queue import FairQueue, JobRegistry
 from internal.core.send import Sender, format_caption
 from internal.database.store import Store
 from internal.extractors.downloader import download
@@ -65,8 +66,15 @@ class JobRunner:
         self.username = username
         self.sender = Sender(client, settings)
         self.capacity = asyncio.Semaphore(3)
+        self.queue = FairQueue(3)
+        self.jobs = JobRegistry()
         self.locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self.locks_guard = asyncio.Lock()
+
+    @asynccontextmanager
+    async def _slot(self, chat_id: int):
+        async with self.queue.slot(chat_id), self.capacity:
+            yield
 
     @asynccontextmanager
     async def _lock(self, key: str):
@@ -99,7 +107,7 @@ class JobRunner:
             raise FileTooLarge("The file exceeds the 2 GB limit.")
         if getattr(video, "duration", 0) > self.settings.max_duration:
             raise DurationTooLong("The media exceeds the duration limit.")
-        async with self.capacity:
+        async with self._slot(target_chat_id):
             self.settings.downloads_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="pyvd-music-", dir=self.settings.downloads_dir) as directory:
                 workdir = Path(directory)
@@ -192,7 +200,7 @@ class JobRunner:
                     if not any(part in code for part in ("FILE_ID_INVALID", "FILE_REFERENCE", "MEDIA_EMPTY", "FILE_ID")):
                         raise
 
-            async with self.capacity:
+            async with self._slot(target_chat_id):
                 return await self._download_and_send(
                     request, chat, target_chat_id, reply_to, spoiler, status,
                     inline, public_group, marked_nsfw,

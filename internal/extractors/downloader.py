@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from internal.extractors.extracted import load_extraction
 from internal.extractors.gallery import download_gallery, prefer_gallery
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
+from internal.util.process import finish_task, spawn_process, terminate_process
 
 
 DEFAULT_FORMAT = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best"
@@ -223,12 +225,48 @@ def _download(request: Request, settings: Settings, workdir: Path, use_cookies: 
     return media
 
 
-def _download_in_process(request: Request, settings: Settings, workdir: Path, use_cookies: bool = True) -> Media:
-    from concurrent.futures import ProcessPoolExecutor
-    from multiprocessing import get_context
-
-    with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as pool:
-        return pool.submit(_download, request, settings, workdir, use_cookies).result()
+async def _download_in_process(request: Request, settings: Settings, workdir: Path, use_cookies: bool = True) -> Media:
+    result_path = workdir / "download-result.json"
+    result_path.unlink(missing_ok=True)
+    job = json.dumps({
+        "root": str(settings.root), "workdir": str(workdir),
+        "extractor_id": request.extractor_id, "content_id": request.content_id,
+        "url": request.url, "use_cookies": use_cookies,
+    }).encode()
+    process = await spawn_process(
+        sys.executable, "-m", "internal.extractors.download_worker",
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    communication = asyncio.create_task(process.communicate(job))
+    try:
+        await asyncio.shield(communication)
+        if process.returncode or not result_path.is_file():
+            raise NoMedia("Could not download media from this link.")
+        result = json.loads(result_path.read_text())
+        if "error" in result:
+            error = {
+                "MediaError": MediaError, "NoMedia": NoMedia,
+                "FileTooLarge": FileTooLarge, "DurationTooLong": DurationTooLong,
+                "AuthenticationRequired": AuthenticationRequired,
+                "SessionCheckRequired": SessionCheckRequired,
+            }.get(result["error"], NoMedia)
+            raise error(result["message"])
+        data = result["media"]
+        items = []
+        for item in data.pop("items"):
+            for name in ("path", "thumbnail"):
+                if item[name] is not None:
+                    path = Path(item[name]).resolve()
+                    if not path.is_relative_to(workdir.resolve()):
+                        raise NoMedia("The downloaded media file is unavailable.")
+                    item[name] = path
+            items.append(MediaItem(**item))
+        return Media(**data, items=items)
+    finally:
+        await terminate_process(process)
+        await finish_task(communication)
+        result_path.unlink(missing_ok=True)
 
 
 async def download(request: Request, settings: Settings, workdir: Path) -> Media:
@@ -241,10 +279,10 @@ async def download(request: Request, settings: Settings, workdir: Path) -> Media
         except NoMedia:
             pass
     try:
-        return await asyncio.to_thread(_download_in_process, request, settings, workdir)
+        return await _download_in_process(request, settings, workdir)
     except SessionCheckRequired as checkpoint:
         try:
-            return await asyncio.to_thread(_download_in_process, request, settings, workdir, False)
+            return await _download_in_process(request, settings, workdir, False)
         except NoMedia as exc:
             raise checkpoint from exc
     except NoMedia:

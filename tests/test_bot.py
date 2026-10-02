@@ -1,9 +1,11 @@
+import asyncio
 from types import SimpleNamespace
 from datetime import datetime, timezone
 
 import pytest
 from hydrogram import enums
 
+from internal.core.queue import JobRegistry
 from internal.bot.main import Bot, allowed, bot_commands, chat_kind, help_text
 from internal.bot.chat import is_public_group
 from internal.core.errors import AuthenticationRequired, MediaError, NoAttachments, NoMedia
@@ -44,9 +46,55 @@ def test_help_and_command_menus_describe_music_and_group_settings() -> None:
     assert "/download" not in help_text("group")
     assert "DM or private group" in help_text("group", public_group=True)
     assert [command.command for command in bot_commands(False)] == [
-        "start", "help", "extractors", "music",
+        "start", "help", "extractors", "music", "cancel",
     ]
     assert [command.command for command in bot_commands(True)][-1] == "settings"
+
+
+@pytest.mark.asyncio
+async def test_cancel_remains_responsive_and_only_requester_can_cancel():
+    replies = []
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+
+    class Runner:
+        jobs = JobRegistry()
+
+        async def run(self, *args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+    class Store:
+        async def chat(self, chat_id, kind):
+            return ChatSettings(chat_id, kind, True, False, False, 10, False)
+
+    class Message:
+        date = datetime.now(timezone.utc)
+        chat = SimpleNamespace(id=123, type=enums.ChatType.PRIVATE)
+
+        def __init__(self, text, id, user, reply=None):
+            self.text, self.id = text, id
+            self.from_user = SimpleNamespace(id=user)
+            self.reply_to_message_id = reply
+
+        async def reply(self, text, **kwargs):
+            replies.append(text)
+
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
+    bot.runner = Runner()
+    await asyncio.wait_for(bot.on_message(None, Message("https://youtu.be/YE7VzlLtp-4", 1, 7)), 1)
+    await started.wait()
+    await bot.on_message(None, Message("/cancel", 2, 8, 1))
+    assert not cleaned.is_set()
+    await bot.on_message(None, Message("/cancel", 3, 7, 1))
+    await asyncio.wait_for(cleaned.wait(), 1)
+    await bot.close()
+    assert replies == ["No active download of yours was found for that message.", "Cancelling your download."]
+    assert bot.runner.jobs.pending == 0
+    assert not bot.job_tasks
 
 
 @pytest.mark.asyncio
@@ -64,6 +112,8 @@ async def test_help_command_replies_with_current_usage() -> None:
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset(), admins=frozenset()), SimpleNamespace())
     await bot.on_message(None, Message())
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert len(replies) == 1
     assert "/music" in replies[0][0]
     assert replies[0][1]["parse_mode"] == enums.ParseMode.DISABLED
@@ -103,6 +153,7 @@ async def test_public_group_handles_plain_links_without_commands(
             return ChatSettings(chat_id, kind, True, False, False, 10, False)
 
     class Runner:
+        jobs = JobRegistry()
         async def run(self, request, chat, target_chat_id, **kwargs):
             assert "status" not in kwargs
             calls.append((
@@ -113,6 +164,8 @@ async def test_public_group_handles_plain_links_without_commands(
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset(), admins=frozenset()), Store())
     bot.runner = Runner()
     await bot.on_message(None, Message())
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert calls == ([("youtube", True, marked, False)] if accepted else [])
 
 
@@ -146,12 +199,15 @@ async def test_plain_links_download_in_dm_and_private_group(
             return ChatSettings(chat_id, requested_kind, True, False, False, 10, False)
 
     class Runner:
+        jobs = JobRegistry()
         async def run(self, request, chat, target_chat_id, **kwargs):
             calls.append((request.extractor_id, chat.kind, kwargs["public_group"]))
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
     bot.runner = Runner()
     await bot.on_message(None, Message())
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert calls == [("vimeo", kind, False)]
 
 
@@ -176,16 +232,23 @@ async def test_ignored_links_stay_silent_but_extractor_errors_reply() -> None:
             return ChatSettings(chat_id, kind, True, False, False, 10, False)
 
     class Runner:
+        jobs = JobRegistry()
         async def run(self, *args, **kwargs):
             raise NoMedia("No media was found at this link.")
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
     bot.runner = Runner()
     await bot.on_message(None, Message("https://x.com/username"))
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert replies == []
     await bot.on_message(None, Message("https://t.me/example/123"))
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert replies == []
     await bot.on_message(None, Message("https://www.reddit.com/gallery/abc123"))
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert replies == ["⚠️ No media was found at this link."]
 
 
@@ -208,12 +271,15 @@ async def test_download_error_sends_one_reply_without_temporary_status() -> None
             return ChatSettings(chat_id, kind, True, False, False, 10, False)
 
     class Runner:
+        jobs = JobRegistry()
         async def run(self, *args, **kwargs):
             raise MediaError("The file exceeds the 2 GB limit.")
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
     bot.runner = Runner()
     await bot.on_message(None, Message())
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert replies == ["⚠️ The file exceeds the 2 GB limit."]
 
 
@@ -250,12 +316,15 @@ async def test_text_only_posts_are_ignored_but_failures_reply(chat_type, usernam
             return ChatSettings(chat_id, kind, True, False, False, 10, True)
 
     class Runner:
+        jobs = JobRegistry()
         async def run(self, *args, **kwargs):
             raise error
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
     bot.runner = Runner()
     await bot.on_message(None, Message())
+    if bot.job_tasks:
+        await asyncio.gather(*bot.job_tasks)
     assert replies == ([] if isinstance(error, NoAttachments) else [f"⚠️ {error}"])
 
 
@@ -273,7 +342,7 @@ async def test_start_registers_private_and_group_commands() -> None:
     bot = Bot(Client(), SimpleNamespace(), SimpleNamespace())
     await bot.start()
     assert [command.command for command in menus[0][0]] == [
-        "start", "help", "extractors", "music",
+        "start", "help", "extractors", "music", "cancel",
     ]
     assert menus[0][1] == {}
     assert [command.command for command in menus[1][0]][-1] == "settings"

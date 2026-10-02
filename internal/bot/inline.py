@@ -18,6 +18,7 @@ from internal.extractors.sites import (
     OTHER_SITE_ID, SITE_NAMES, Request, allowed_in_public_group, first_supported_url,
 )
 from internal.models.media import MediaItem
+from internal.util.process import finish_task
 
 
 def _edit_media(token: str, message_id: str, item: MediaItem, caption: str) -> None:
@@ -65,29 +66,77 @@ class Inline:
         self.settings = settings
         self.store = store
         self.pending: dict[str, Pending] = {}
+        self.tasks: set[asyncio.Task[None]] = set()
+        self._expirations: dict[str, asyncio.TimerHandle] = {}
+        self._closed = False
         self.runner: JobRunner | None = None
         self.username = ""
 
     def add(self, user_id: int, request: Request, public_group: bool = False) -> str:
+        if self._closed:
+            raise RuntimeError("Inline delivery is closed.")
         now = time.monotonic()
-        self.pending = {key: item for key, item in self.pending.items() if item.expires > now}
+        for key, item in list(self.pending.items()):
+            if item.expires <= now:
+                self._discard(key)
         task_id = secrets.token_hex(8)
         self.pending[task_id] = Pending(user_id, request, now + 300, public_group)
         try:
-            asyncio.get_running_loop().call_later(300, self.pending.pop, task_id, None)
+            self._expirations[task_id] = asyncio.get_running_loop().call_later(
+                300, self._discard, task_id,
+            )
         except RuntimeError:
             pass
         return task_id
 
+    def _discard(self, task_id: str) -> None:
+        self.pending.pop(task_id, None)
+        expiration = self._expirations.pop(task_id, None)
+        if expiration is not None:
+            expiration.cancel()
+
     def pop(self, task_id: str, user_id: int) -> Pending | None:
         item = self.pending.get(task_id)
+        if item and item.expires <= time.monotonic():
+            self._discard(task_id)
+            return None
         if item and item.user_id == user_id and item.expires > time.monotonic():
-            del self.pending[task_id]
+            self._discard(task_id)
             return item
         return None
 
+    def _start_delivery(self, pending: Pending, user_id: int, message_id: str) -> None:
+        if self._closed:
+            return
+        task = asyncio.create_task(self._deliver(pending, user_id, message_id))
+        self.tasks.add(task)
+        task.add_done_callback(self._finished)
+
+    def _finished(self, task: asyncio.Task[None]) -> None:
+        self.tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def close(self) -> None:
+        self._closed = True
+        for task_id in list(self.pending):
+            self._discard(task_id)
+        tasks = list(self.tasks)
+        for task in tasks:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        if tasks:
+            cleanup = asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await finish_task(cleanup)
+                raise
+
     async def query(self, _: Client, query: types.InlineQuery) -> None:
-        if self.settings.whitelist and query.from_user.id not in self.settings.whitelist:
+        if self._closed or (
+            self.settings.whitelist and query.from_user.id not in self.settings.whitelist
+        ):
             await query.answer([], cache_time=0, is_personal=True)
             return
         request = first_supported_url(query.query or "")
@@ -122,7 +171,7 @@ class Inline:
             return
         pending = self.pop(chosen.result_id, chosen.from_user.id)
         if pending is not None:
-            await self._deliver(pending, chosen.from_user.id, chosen.inline_message_id)
+            self._start_delivery(pending, chosen.from_user.id, chosen.inline_message_id)
 
     async def callback(self, query: types.CallbackQuery) -> bool:
         data = query.data
@@ -137,8 +186,21 @@ class Inline:
             await query.answer("This download has started or expired. Send the query again if needed.", show_alert=True)
             return True
         await query.answer("Downloading media…")
-        await self._deliver(pending, query.from_user.id, query.inline_message_id)
+        self._start_delivery(pending, query.from_user.id, query.inline_message_id)
         return True
+
+    async def _replace_media(self, message_id: str, item: MediaItem, caption: str) -> None:
+        task = asyncio.create_task(asyncio.to_thread(
+            _edit_media, self.settings.bot_token, message_id, item, caption,
+        ))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await finish_task(task)
+            except Exception:
+                pass
+            raise
 
     async def _deliver(self, pending: Pending, user_id: int, inline_message_id: str) -> None:
         if self.runner is None:
@@ -153,9 +215,8 @@ class Inline:
                     cached.url = request.url
                     check_group_nsfw(cached, chat, pending.public_group)
                     try:
-                        await asyncio.to_thread(
-                            _edit_media, self.settings.bot_token, inline_message_id,
-                            cached.items[0],
+                        await self._replace_media(
+                            inline_message_id, cached.items[0],
                             format_caption(cached, chat, self.settings, self.username),
                         )
                         return
@@ -165,9 +226,8 @@ class Inline:
                 request, chat, user_id, inline=True, public_group=pending.public_group,
             )
             staged = delivery.messages
-            await asyncio.to_thread(
-                _edit_media, self.settings.bot_token, inline_message_id,
-                delivery.media.items[0],
+            await self._replace_media(
+                inline_message_id, delivery.media.items[0],
                 format_caption(delivery.media, chat, self.settings, self.username),
             )
         except NoAttachments:

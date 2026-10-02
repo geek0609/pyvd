@@ -1,6 +1,10 @@
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+import asyncio
+import json
+import sys
 
 import pytest
 
@@ -8,7 +12,7 @@ from internal.core.errors import AuthenticationRequired, FileTooLarge, NoAttachm
 from internal.extractors import downloader
 from internal.extractors.extracted import save_extraction
 from internal.extractors.sites import Request
-from internal.models.media import Media
+from internal.models.media import Media, MediaItem
 
 
 def _settings(tmp_path: Path) -> SimpleNamespace:
@@ -282,7 +286,7 @@ async def test_instagram_auth_error_survives_failed_ytdlp_fallback(
     async def gallery(*args):
         raise auth_error
 
-    def ytdlp(*args):
+    async def ytdlp(*args):
         raise NoMedia("Could not download media from this link.")
 
     monkeypatch.setattr(downloader, "download_gallery", gallery)
@@ -292,8 +296,63 @@ async def test_instagram_auth_error_survives_failed_ytdlp_fallback(
     assert exc.value is auth_error
 
     media = Media("instagram", "reel", request.url)
-    monkeypatch.setattr(downloader, "_download_in_process", lambda *args: media)
+    monkeypatch.setattr(downloader, "_download_in_process", AsyncMock(return_value=media))
     assert await downloader.download(request, _settings(tmp_path), tmp_path) is media
+
+
+@pytest.mark.asyncio
+async def test_worker_roundtrip_and_result_cleanup(tmp_path, monkeypatch):
+    from dataclasses import asdict
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    media = Media("youtube", "video", "", nsfw=True,
+                  items=[MediaItem("video", path=video, video_codec="avc")])
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self, data):
+            job = json.loads(data)
+            assert job["use_cookies"] is False
+            (tmp_path / "download-result.json").write_text(json.dumps({"media": asdict(media)}, default=str))
+            return None, None
+
+    async def spawn(*args, **kwargs):
+        assert args[-1] == "internal.extractors.download_worker"
+        return Process()
+
+    monkeypatch.setattr(downloader, "spawn_process", spawn)
+    result = await downloader._download_in_process(
+        Request("youtube", "video", "https://youtu.be/video"), SimpleNamespace(root=tmp_path), tmp_path, False,
+    )
+    assert result == media
+    assert not (tmp_path / "download-result.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_downloader_cancellation_reaps_worker_before_return(tmp_path, monkeypatch):
+    from internal.util.process import spawn_process
+
+    ready = asyncio.Event()
+    processes = []
+
+    async def spawn(*args, **kwargs):
+        process = await spawn_process(sys.executable, "-c", "import time; time.sleep(60)", **kwargs)
+        processes.append(process)
+        ready.set()
+        return process
+
+    monkeypatch.setattr(downloader, "spawn_process", spawn)
+    task = asyncio.create_task(downloader._download_in_process(
+        Request("youtube", "video", "https://youtu.be/video"), SimpleNamespace(root=tmp_path), tmp_path,
+    ))
+    await ready.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+    assert processes[0].returncode is not None
+    assert not (tmp_path / "download-result.json").exists()
 
 
 @pytest.mark.asyncio
@@ -309,7 +368,7 @@ async def test_instagram_checkpoint_retries_without_cookies_and_preserves_errors
     async def gallery(*args):
         raise NoMedia("HTTP 400")
 
-    def ytdlp(request, settings, workdir, use_cookies=True):
+    async def ytdlp(request, settings, workdir, use_cookies=True):
         calls.append(use_cookies)
         if use_cookies:
             raise checkpoint
@@ -342,7 +401,7 @@ async def test_twitter_no_video_uses_gallery_without_hiding_failures(
     media = Media("twitter", "123", request.url)
     error = NoAttachments("No attachments") if result == "text" else NoMedia("Fetch failed")
 
-    def ytdlp(*args):
+    async def ytdlp(*args):
         raise NoMedia("No video found")
 
     async def gallery(*args):
@@ -362,6 +421,6 @@ async def test_twitter_no_video_uses_gallery_without_hiding_failures(
     async def unexpected_gallery(*args):
         raise AssertionError("successful videos must not use the fallback")
 
-    monkeypatch.setattr(downloader, "_download_in_process", lambda *args: media)
+    monkeypatch.setattr(downloader, "_download_in_process", AsyncMock(return_value=media))
     monkeypatch.setattr(downloader, "download_gallery", unexpected_gallery)
     assert await downloader.download(request, _settings(tmp_path), tmp_path) is media

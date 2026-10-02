@@ -13,6 +13,7 @@ from internal.extractors.extracted import load_extraction
 from internal.extractors.gallery_worker import replay_messages
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
+from internal.util.process import finish_task, kill_process_group, spawn_process, terminate_process
 
 
 GALLERY_SITES = {"instagram", "pinterest", "reddit", "threads", "ninegag"}
@@ -138,17 +139,13 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
             "extractor_id": request.extractor_id,
             "content_id": request.content_id, "url": request.url,
         }).encode()
-    process = await asyncio.create_subprocess_exec(
+    process = await spawn_process(
         *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.PIPE if replay else asyncio.subprocess.DEVNULL,
     )
 
     def stop_process() -> None:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+        kill_process_group(process)
 
     output_task = asyncio.create_task(process.communicate(job) if replay else process.communicate())
     try:
@@ -160,17 +157,16 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
             for path in gallery_dir.rglob("*"):
                 if path.is_file() and path.stat().st_size > settings.max_file_size:
                     stop_process()
-                    await output_task
+                    await finish_task(output_task)
                     raise FileTooLarge("The file exceeds the 2 GB limit.")
             if shutil.disk_usage(workdir).free < 512_000_000:
                 stop_process()
-                await output_task
+                await finish_task(output_task)
                 raise NoMedia("Not enough free disk space for this download.")
         _, stderr = await output_task
     finally:
-        if process.returncode is None:
-            stop_process()
-            await process.wait()
+        await terminate_process(process)
+        await finish_task(output_task)
     paths = files_in(gallery_dir)
     if len(paths) > 20:
         raise MediaError("The post contains more than 20 media items.")
