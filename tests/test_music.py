@@ -30,7 +30,8 @@ def test_replied_video_accepts_only_pyvd_video() -> None:
 
 
 @pytest.mark.asyncio
-async def test_music_command_sends_audio_without_temporary_status() -> None:
+@pytest.mark.parametrize("marked", [False, True])
+async def test_music_command_sends_audio_without_temporary_status(marked) -> None:
     events = []
     video = SimpleNamespace(file_id="video")
 
@@ -47,14 +48,18 @@ async def test_music_command_sends_audio_without_temporary_status() -> None:
             raise AssertionError("successful /music must not send a status message")
 
     class Store:
+        async def is_nsfw_file(self, file_id):
+            return marked
+
         async def chat(self, chat_id, kind):
             return ChatSettings(chat_id, kind, True, False, False, 10, False)
 
     class Runner:
         jobs = JobRegistry()
-        async def run_music(self, source, chat, chat_id, reply_to, status):
+        async def run_music(self, source, chat, chat_id, reply_to, status, **kwargs):
             assert (source, chat.chat_id, chat_id, reply_to) == (video, 123, 123, 6)
             assert status is None
+            assert kwargs == {"marked_nsfw": marked, "public_group": False}
             events.append("sent")
 
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
@@ -131,7 +136,7 @@ async def test_group_music_rejects_cached_nsfw_video_when_disabled() -> None:
 
 @pytest.mark.asyncio
 async def test_music_rejects_oversize_video_before_download(tmp_path: Path) -> None:
-    settings = SimpleNamespace(max_file_size=100, max_duration=3600, downloads_dir=tmp_path)
+    settings = SimpleNamespace(max_file_size=100, max_duration=3600, downloads_dir=tmp_path, caching=False)
     runner = JobRunner(SimpleNamespace(), settings, SimpleNamespace(), "pyvd")
     video = SimpleNamespace(file_size=101, duration=10)
     with pytest.raises(FileTooLarge):
@@ -170,7 +175,7 @@ async def test_music_downloads_and_sends_audio_as_reply(tmp_path: Path, monkeypa
         return MediaItem(kind="audio", path=source, size=5, audio_codec="aac", title=title)
 
     monkeypatch.setattr("internal.core.tasks.extract_audio", fake_extract)
-    settings = SimpleNamespace(max_file_size=100, max_duration=3600, downloads_dir=tmp_path)
+    settings = SimpleNamespace(max_file_size=100, max_duration=3600, downloads_dir=tmp_path, caching=False)
     runner = JobRunner(Client(), settings, SimpleNamespace(), "pyvd")
     runner.sender = Sender()
     video = SimpleNamespace(file_id="video-id", file_size=5, duration=1, file_name="streamed.mp4")
@@ -190,3 +195,65 @@ async def test_music_rejects_video_without_audio(tmp_path: Path, monkeypatch) ->
             tmp_path / "video", tmp_path,
             SimpleNamespace(max_duration=3600, max_file_size=100), "Audio",
         )
+
+
+@pytest.mark.asyncio
+async def test_music_reuses_audio_across_chats_while_download_slots_are_busy(tmp_path, monkeypatch):
+    import copy
+
+    cached = {}
+    downloads, sends = [], []
+
+    class Store:
+        async def cached_media(self, extractor, identity):
+            return copy.deepcopy(cached.get((extractor, identity)))
+
+        async def save_media(self, media):
+            saved = copy.deepcopy(media)
+            saved.items[0].path = None
+            cached[(media.extractor_id, media.content_id)] = saved
+
+    class Client:
+        async def download_media(self, video, file_name, progress):
+            downloads.append(video.file_id)
+            path = Path(file_name)
+            path.write_bytes(b"video")
+            return path
+
+    class Sender:
+        async def send(self, chat_id, media, caption, **kwargs):
+            sends.append((chat_id, kwargs["reply_to"]))
+            if media.items[0].file_id:
+                assert media.items[0].path is None
+            else:
+                media.items[0].file_id = "reusable-audio"
+
+    async def extract(source, workdir, settings, title):
+        return MediaItem("audio", path=source, size=5, duration=1, audio_codec="aac")
+
+    monkeypatch.setattr("internal.core.tasks.extract_audio", extract)
+    config = SimpleNamespace(caching=True, max_file_size=100, max_duration=60, downloads_dir=tmp_path)
+    runner = JobRunner(Client(), config, Store(), "pyvd")
+    runner.sender = Sender()
+    video = SimpleNamespace(file_id="first-reference", file_unique_id="content-id", file_size=5,
+                            duration=1, file_name="video.mp4")
+    first = ChatSettings(1, "private", True, False, False, 10, False)
+    await runner.run_music(video, first, 1, 10, None, marked_nsfw=True)
+    video.file_id = "refreshed-reference"
+    for _ in range(3):
+        await runner.capacity.acquire()
+    try:
+        second = ChatSettings(2, "private", True, True, False, 10, False)
+        await asyncio.wait_for(runner.run_music(video, second, 2, 20, None), 1)
+    finally:
+        for _ in range(3):
+            runner.capacity.release()
+    assert downloads == ["first-reference"]
+    assert sends == [(1, 10), (2, 20)]
+    assert list(cached) == [("telegram_audio", "content-id")]
+    assert cached[("telegram_audio", "content-id")].nsfw
+    group = ChatSettings(3, "group", True, False, False, 10, False)
+    with pytest.raises(MediaError, match="disabled in this group"):
+        await runner.run_music(video, group, 3, 30, None)
+    assert len(sends) == 2
+    assert not runner.locks and not list(tmp_path.iterdir())

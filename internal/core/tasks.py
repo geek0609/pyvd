@@ -12,6 +12,7 @@ from hydrogram import Client, enums, types
 from internal.config.settings import Settings
 from internal.core.errors import DurationTooLong, FileTooLarge, MediaError
 from internal.core.media import extract_audio, prepare
+from internal.core.music import check_music_policy, music_id, music_media, send_cached_music
 from internal.core.queue import FairQueue, JobRegistry
 from internal.core.send import Sender, format_caption
 from internal.database.store import Store
@@ -102,53 +103,68 @@ class JobRunner:
     async def run_music(
         self, video: types.Video | types.Document, chat: ChatSettings,
         target_chat_id: int, reply_to: int, status: types.Message | None,
+        marked_nsfw: bool = False, public_group: bool = False,
     ) -> None:
         if video.file_size and video.file_size > self.settings.max_file_size:
             raise FileTooLarge("The file exceeds the 2 GB limit.")
         if getattr(video, "duration", 0) > self.settings.max_duration:
             raise DurationTooLong("The media exceeds the duration limit.")
-        async with self._slot(target_chat_id):
-            self.settings.downloads_dir.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="pyvd-music-", dir=self.settings.downloads_dir) as directory:
-                workdir = Path(directory)
-                last_update = 0.0
-                too_large = False
+        async with self._lock("music:" + music_id(video)):
+            cached = await send_cached_music(
+                self.store, self.sender, self.settings, video, chat,
+                target_chat_id, reply_to, status, marked_nsfw, public_group,
+            )
+            if cached.delivered:
+                return
+            marked_nsfw = cached.marked_nsfw
+            async with self._slot(target_chat_id):
+                self.settings.downloads_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix="pyvd-music-", dir=self.settings.downloads_dir) as directory:
+                    workdir = Path(directory)
+                    last_update = 0.0
+                    too_large = False
 
-                async def progress(current: int, total: int) -> None:
-                    nonlocal last_update, too_large
-                    if current > self.settings.max_file_size:
-                        too_large = True
+                    async def progress(current: int, total: int) -> None:
+                        nonlocal last_update, too_large
+                        if current > self.settings.max_file_size:
+                            too_large = True
+                            raise FileTooLarge("The file exceeds the 2 GB limit.")
+                        now = time.monotonic()
+                        if total and (now - last_update > 5 or current == total):
+                            last_update = now
+                            await self._status(status, f"Downloading video… {current * 100 // total}%")
+
+                    await self._status(status, "Downloading video…")
+                    downloaded = await self.client.download_media(
+                        video, file_name=str(workdir / "video"), progress=progress,
+                    )
+                    if too_large:
                         raise FileTooLarge("The file exceeds the 2 GB limit.")
-                    now = time.monotonic()
-                    if total and (now - last_update > 5 or current == total):
-                        last_update = now
-                        await self._status(status, f"Downloading video… {current * 100 // total}%")
-
-                await self._status(status, "Downloading video…")
-                downloaded = await self.client.download_media(
-                    video, file_name=str(workdir / "video"), progress=progress,
-                )
-                if too_large:
-                    raise FileTooLarge("The file exceeds the 2 GB limit.")
-                if downloaded is None:
-                    raise MediaError("Could not download this video from Telegram.")
-                source = Path(downloaded)
-                downloaded_size = source.stat().st_size
-                if downloaded_size > self.settings.max_file_size:
-                    raise FileTooLarge("The file exceeds the 2 GB limit.")
-                if video.file_size and downloaded_size != video.file_size:
-                    raise MediaError("Telegram returned an incomplete video download.")
-                await self._status(status, "Extracting audio…")
-                title = Path(video.file_name or "Audio").stem or "Audio"
-                if title.lower() in {"streamed", "video"}:
-                    title = "Audio"
-                item = await extract_audio(source, workdir, self.settings, title)
-                await self._status(status, "Uploading audio…")
-                media = Media("telegram", str(reply_to), "", items=[item])
-                await self.sender.send(
-                    target_chat_id, media, "", reply_to=reply_to,
-                    silent=chat.silent, status=status,
-                )
+                    if downloaded is None:
+                        raise MediaError("Could not download this video from Telegram.")
+                    source = Path(downloaded)
+                    downloaded_size = source.stat().st_size
+                    if downloaded_size > self.settings.max_file_size:
+                        raise FileTooLarge("The file exceeds the 2 GB limit.")
+                    if video.file_size and downloaded_size != video.file_size:
+                        raise MediaError("Telegram returned an incomplete video download.")
+                    await self._status(status, "Extracting audio…")
+                    title = Path(video.file_name or "Audio").stem or "Audio"
+                    if title.lower() in {"streamed", "video"}:
+                        title = "Audio"
+                    item = await extract_audio(source, workdir, self.settings, title)
+                    await self._status(status, "Uploading audio…")
+                    check_music_policy(marked_nsfw, chat, public_group)
+                    media = music_media(video, item, marked_nsfw)
+                    await self.sender.send(
+                        target_chat_id, media, "", reply_to=reply_to,
+                        silent=chat.silent, status=status,
+                    )
+                    if self.settings.caching:
+                        try:
+                            await self.store.save_media(media)
+                        except Exception:
+                            pass
 
     async def run(
         self, request: Request, chat: ChatSettings, target_chat_id: int,

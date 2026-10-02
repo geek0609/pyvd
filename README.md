@@ -100,6 +100,8 @@ still receive an error reply. Photo-only X posts use the gallery extractor.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music
 message. AAC and MP3 tracks keep their original quality; other audio tracks
 are converted to MP3. The same file size and duration limits apply.
+Extracted music is cached by the video’s Telegram identity. Repeated `/music`
+requests reuse the uploaded audio without downloading or extracting it again.
 Group admins can use `/settings` for captions, silent delivery, marked media,
 album limits, and source link deletion. Inline mode supports one media item per
 link. The group NSFW switch blocks media marked by source metadata or `#nsfw`

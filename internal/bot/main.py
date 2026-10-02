@@ -268,7 +268,8 @@ class Bot:
             if self.runner is None:
                 raise RuntimeError("bot is not started")
             chat = await self.store.chat(message.chat.id, kind)
-            if kind == "group" and await self.store.is_nsfw_file(video.file_id):
+            marked_nsfw = await self.store.is_nsfw_file(video.file_id)
+            if kind == "group" and marked_nsfw:
                 if not chat.nsfw:
                     raise MediaError("Marked media is disabled in this group.")
                 if public_group:
@@ -276,7 +277,10 @@ class Bot:
                         "Audio from marked videos is unavailable here. "
                         "Use a DM or private group."
                     )
-            await self.runner.run_music(video, chat, message.chat.id, message.id, None)
+            await self.runner.run_music(
+                video, chat, message.chat.id, message.id, None,
+                marked_nsfw=marked_nsfw, public_group=public_group,
+            )
         except MediaError as exc:
             await message.reply(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
         except Exception:
