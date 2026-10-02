@@ -59,8 +59,6 @@ def _copy_source(fmt: dict, fifo: Path, proxy: str, errors: list[str]) -> None:
 
 
 def main() -> int:
-    import yt_dlp
-
     job = json.loads(sys.stdin.readline())
     settings = load_settings(Path(job["root"]))
     site = settings.site(job["extractor_id"])
@@ -68,6 +66,8 @@ def main() -> int:
     if site.edge_proxy or job_cookie_file(settings, job["extractor_id"], workdir):
         print('{"available":false}', flush=True)
         return 0
+    import yt_dlp
+
     proxy = site.download_proxy or ("" if site.disable_proxy else site.proxy or settings.proxy)
     options = {
         "format": H264_FORMAT if job["extractor_id"] == "youtube" else DEFAULT_FORMAT,

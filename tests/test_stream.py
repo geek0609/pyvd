@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,6 +24,40 @@ async def test_gallery_posts_keep_the_gallery_downloader(tmp_path: Path) -> None
         Request("tiktok", "123", "https://www.tiktok.com/@user/photo/123"),
     ):
         assert await stream.try_stream_upload(None, request, None, tmp_path) is None
+
+
+async def test_edge_proxy_does_not_start_a_stream_worker(tmp_path: Path, monkeypatch) -> None:
+    async def unexpected_worker(*args, **kwargs):
+        raise AssertionError("an ineligible stream must skip worker startup")
+
+    monkeypatch.setattr(stream.asyncio, "create_subprocess_exec", unexpected_worker)
+    settings = SimpleNamespace(site=lambda _: SimpleNamespace(edge_proxy="https://edge.example"))
+    assert await stream.try_stream_upload(
+        None, Request("twitter", "123", "https://x.com/user/status/123"), settings, tmp_path,
+    ) is None
+
+
+async def test_eligible_stream_still_starts_worker(tmp_path: Path, monkeypatch) -> None:
+    starts = []
+    process = SimpleNamespace(
+        stdin=SimpleNamespace(write=lambda _: None, drain=AsyncMock(), close=lambda: None),
+        stdout=SimpleNamespace(readline=AsyncMock(return_value=b'{"available":false}\n')),
+        wait=AsyncMock(return_value=0), returncode=0,
+    )
+
+    async def start(*args, **kwargs):
+        starts.append(args)
+        return process
+
+    monkeypatch.setattr(stream.asyncio, "create_subprocess_exec", start)
+    settings = SimpleNamespace(
+        root=tmp_path, site=lambda _: SimpleNamespace(edge_proxy=""),
+        cookie_path=lambda _: tmp_path / "missing.txt",
+    )
+    assert await stream.try_stream_upload(
+        None, Request("youtube", "123", "https://youtu.be/123"), settings, tmp_path,
+    ) is None
+    assert len(starts) == 1
 
 
 @pytest.mark.parametrize("length,expected", [

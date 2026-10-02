@@ -107,6 +107,8 @@ async def try_stream_upload(
 ) -> UploadedVideo | None:
     if request.extractor_id not in STREAM_SITES or prefer_gallery(request):
         return None
+    if settings.site(request.extractor_id).edge_proxy:
+        return None
     process = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "internal.extractors.stream_worker",
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
