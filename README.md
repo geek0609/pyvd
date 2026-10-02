@@ -72,6 +72,14 @@ FFmpeg and ffprobe are required for local runs. Start with
 `.venv/bin/python cmd/main.py` after the existing bot using the same token has
 stopped.
 
+## Owner health checks
+
+Accounts listed in `ADMINS` can use `/health` in a DM with PyVD. It reports active
+and queued download slots, local cookie expiration, and connectivity through
+configured proxies. Cookie expiry cannot prove that a site still accepts the
+login session. The command does not expose cookie values, account IDs, proxy
+addresses, or download details, and sends no automatic notifications.
+
 ## Oracle deployment layout
 
 The compose file joins `govd_govd-network` to reach the existing `db`

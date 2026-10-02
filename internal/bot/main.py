@@ -9,6 +9,7 @@ from hydrogram import Client, enums, filters, idle, types
 
 from internal.config.settings import Settings, load_settings
 from internal.bot.chat import is_public_group
+from internal.bot.health import health_report
 from internal.bot.settings import handle_callback, show_settings
 from internal.bot.inline import Inline
 from internal.core.errors import MediaError, NoAttachments
@@ -22,7 +23,7 @@ from internal.networking.proxy import hydrogram_proxy
 TAG_RE = re.compile(r"(?<!\w)#(skip|spoiler|nsfw)\b", re.IGNORECASE)
 
 
-def help_text(kind: str, public_group: bool = False) -> str:
+def help_text(kind: str, public_group: bool = False, owner: bool = False) -> str:
     lines = [
         "Send a supported media link in a DM or group to download it (up to 2 GB). "
         "Use /extractors <name> to search supported sites.",
@@ -42,6 +43,8 @@ def help_text(kind: str, public_group: bool = False) -> str:
             "Public groups accept direct links from the listed site domains. "
             "For other links, use PyVD in a DM or private group."
         )
+    if owner and kind == "private":
+        lines.append("Use /health to check cookie expiry, proxy connectivity, and download slots.")
     return "\n\n".join(lines)
 
 
@@ -162,9 +165,19 @@ class Bot:
             return
         if command == "/help":
             await message.reply(
-                help_text(kind, public_group),
+                help_text(kind, public_group, user_id in self.settings.admins),
                 parse_mode=enums.ParseMode.DISABLED,
             )
+            return
+        if command == "/health":
+            if kind != "private" or user_id not in self.settings.admins:
+                return
+            if self.runner is None:
+                raise RuntimeError("bot is not started")
+            report = await health_report(
+                self.settings, self.runner.queue.active, self.runner.queue.queued,
+            )
+            await message.reply(report, parse_mode=enums.ParseMode.DISABLED)
             return
         if command == "/extractors":
             term = text.partition(" ")[2].strip()
