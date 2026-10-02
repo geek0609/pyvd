@@ -43,13 +43,19 @@ and keep `/setjoingroups` enabled. Telegram then delivers ordinary group
 messages to the bot. A bot made group admin receives all group messages even
 with Privacy Mode enabled; grant admin rights only if link deletion is needed.
 
-For compatible H.264/AAC videos from YouTube, TikTok, X, Facebook, and Instagram, PyVD
+For compatible H.264/AAC videos from named yt-dlp providers and Instagram, PyVD
 uploads Telegram parts while it downloads and remuxes the source. This includes
 YouTube videos and Shorts with separate video and audio tracks, without reducing
-the selected quality. Telegram sends the message after the final part arrives.
-Cookie files are supported, and Instagram uses the same merged MP4 source as
-its normal downloader. Other sites, formats that need more processing, and
-albums use the normal completed-download path.
+the selected quality. Selected HTTP chunk sizes are honored; interrupted range
+transfers resume with bounded retries and byte-range validation. Telegram sends
+the message after the final part arrives.
+
+Finite, unencrypted HLS and DASH sources can also stream through yt-dlp's native
+fragment downloaders. Fragments are fetched sequentially with scoped cookies and
+headers, with at most 32 MiB buffered per fragment. Cookie files are supported,
+and Instagram uses its normal merged MP4 source. Galleries, albums, and formats
+that need more processing use the completed-download path. Streaming never
+selects a lower-quality format to make the upload start sooner.
 
 Cached Telegram media is sent without waiting for a download slot. When
 streaming falls back, PyVD reuses the extracted source details before fetching

@@ -20,7 +20,7 @@ from internal.models.media import Media, MediaItem
 
 
 PART_SIZE = 512 * 1024
-STREAM_SITES = frozenset({"youtube", "tiktok", "twitter", "facebook", "instagram"})
+AUDIO_SITES = frozenset({"soundcloud"})
 
 
 @dataclass
@@ -110,7 +110,7 @@ async def try_stream_upload(
     client: Client, request: Request, settings: Settings, workdir: Path,
     status: types.Message | None = None,
 ) -> UploadedVideo | None:
-    if request.extractor_id not in STREAM_SITES or (
+    if request.extractor_id in AUDIO_SITES or (
         prefer_gallery(request) and request.extractor_id != "instagram"
     ):
         return None

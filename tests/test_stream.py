@@ -15,13 +15,15 @@ def test_stream_formats_keep_h264_and_aac_quality() -> None:
     audio = {"url": "https://example.com/audio", "protocol": "https", "ext": "m4a", "acodec": "mp4a.40.2"}
     assert stream_worker._formats({"requested_formats": [video, audio]}) == [video, audio]
     assert stream_worker._formats({"requested_formats": [{**video, "vcodec": "h265"}, audio]}) is None
-    assert stream_worker._formats({"requested_formats": [{**video, "protocol": "m3u8_native"}, audio]}) is None
+    segmented = {**video, "protocol": "m3u8_native"}
+    assert stream_worker._formats({"requested_formats": [segmented, audio]}) == [segmented, audio]
 
 
 async def test_gallery_posts_keep_the_gallery_downloader(tmp_path: Path) -> None:
     for request in (
         Request("reddit", "post", "https://www.reddit.com/r/test/comments/post"),
         Request("tiktok", "123", "https://www.tiktok.com/@user/photo/123"),
+        Request("soundcloud", "track", "https://soundcloud.com/user/track"),
     ):
         assert await stream.try_stream_upload(None, request, None, tmp_path) is None
 
@@ -41,6 +43,8 @@ async def test_edge_proxy_does_not_start_a_stream_worker(tmp_path: Path, monkeyp
     ("youtube", "https://youtu.be/123"),
     ("twitter", "https://x.com/user/status/123"),
     ("instagram", "https://www.instagram.com/reel/123/"),
+    ("vimeo", "https://vimeo.com/123"),
+    ("dailymotion", "https://www.dailymotion.com/video/123"),
 ])
 async def test_eligible_stream_still_starts_worker(tmp_path: Path, monkeypatch, site, url) -> None:
     starts = []

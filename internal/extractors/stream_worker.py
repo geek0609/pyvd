@@ -4,6 +4,7 @@ import copy
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -16,22 +17,49 @@ from internal.extractors.cookies import job_cookie_file
 from internal.extractors.downloader import DEFAULT_FORMAT, H264_FORMAT, _SilentYtdlpLogger
 from internal.extractors.extracted import save_extraction
 from internal.extractors.sites import Request
-from internal.extractors.source import copy_source as _copy_http_source
+from internal.extractors.source import PipeWriter, copy_source as _copy_http_source
+
+
+SEGMENT_PROTOCOLS = frozenset({"m3u8", "m3u8_native", "http_dash_segments"})
+MAX_FRAGMENT_SIZE = 32 * 1024 * 1024
+MAX_MANIFEST_SIZE = 2 * 1024 * 1024
+
+
+def _finite(info: dict) -> bool:
+    return not (
+        info.get("is_live") or info.get("is_from_start") or info.get("has_drm")
+        or info.get("live_status") in {"is_live", "is_upcoming", "post_live"}
+    )
 
 
 def _source(fmt: dict, *, video: bool) -> bool:
     codec = fmt.get("vcodec" if video else "acodec") or ""
-    return (
+    if not (
         isinstance(fmt.get("url"), str)
         and urlsplit(fmt["url"]).scheme == "https"
-        and not fmt.get("fragments")
-        and fmt.get("protocol") in {"https", "http"}
         and fmt.get("ext") in {"mp4", "m4a"}
         and codec.startswith("avc1" if video else "mp4a")
-    )
+        and _finite(fmt)
+    ):
+        return False
+    protocol = fmt.get("protocol")
+    if protocol in {"https", "http"}:
+        return not fmt.get("fragments")
+    if protocol in {"m3u8", "m3u8_native"}:
+        return not fmt.get("hls_aes")
+    if protocol == "http_dash_segments":
+        fragments = fmt.get("fragments")
+        return isinstance(fragments, list) and bool(fragments) and all(
+            isinstance(fragment, dict) and (fragment.get("url") or fragment.get("path"))
+            and not fragment.get("decrypt_info")
+            for fragment in fragments
+        )
+    return False
 
 
 def _formats(info: dict) -> list[dict] | None:
+    if not _finite(info):
+        return None
     selected = info.get("requested_formats")
     if selected:
         if len(selected) != 2 or not _source(selected[0], video=True) or not _source(selected[1], video=False):
@@ -139,11 +167,126 @@ def _instagram_video(data: list) -> tuple[dict, list[dict]] | None:
     return info, [source]
 
 
+def _hls_manifest(manifest: str, info: dict) -> bool:
+    from yt_dlp.downloader.hls import HlsFD
+
+    return (
+        len(manifest.encode("utf-8")) <= MAX_MANIFEST_SIZE
+        and _finite(info)
+        and "#EXTM3U" in manifest and "#EXT-X-ENDLIST" in manifest
+        and "#EXT-X-STREAM-INF" not in manifest and "#EXT-X-I-FRAME-STREAM-INF" not in manifest
+        and not any(
+            re.search(r"\bMETHOD\s*=\s*NONE\b", line) is None
+            for line in map(str.strip, manifest.splitlines())
+            if line.startswith(("#EXT-X-KEY:", "#EXT-X-SESSION-KEY:"))
+        )
+        and HlsFD.can_download(manifest, info)
+    )
+
+
+def _copy_segments(
+    fmt: dict, fifo: Path, proxy: str, cookies: CookieJar,
+    stopped: threading.Event, errors: list[str],
+) -> None:
+    import yt_dlp
+    from yt_dlp.downloader.dash import DashSegmentsFD
+    from yt_dlp.downloader.hls import HlsFD
+    from yt_dlp.networking import Request as SourceRequest
+
+    options = {
+        "quiet": True, "no_warnings": True, "noprogress": True,
+        "logger": _SilentYtdlpLogger(), "external_downloader": "native",
+        "nopart": True, "continuedl": False, "_no_ytdl_file": True,
+        "updatetime": False, "skip_unavailable_fragments": False,
+        "concurrent_fragment_downloads": 1, "fragment_retries": 3, "retries": 3,
+        "max_filesize": MAX_FRAGMENT_SIZE, "buffersize": 64 * 1024,
+        "noresizebuffer": True, "socket_timeout": 30,
+    }
+    if proxy:
+        options["proxy"] = proxy
+    source = dict(fmt)
+    source.setdefault("id", "source")
+    try:
+        # Opening before network requests guarantees FFmpeg receives EOF if extraction fails.
+        with PipeWriter(fifo, stopped) as output, yt_dlp.YoutubeDL(options) as ydl:
+            ydl.cookiejar = _copy_cookies(cookies)
+            if fmt["protocol"] in {"m3u8", "m3u8_native"}:
+                manifest = fmt.get("hls_media_playlist_data")
+                if not manifest:
+                    with ydl.urlopen(SourceRequest(fmt["url"], headers=fmt.get("http_headers") or {})) as response:
+                        raw_manifest = response.read(MAX_MANIFEST_SIZE + 1)
+                        if len(raw_manifest) > MAX_MANIFEST_SIZE:
+                            raise RuntimeError("The media playlist is too large to stream")
+                        manifest = raw_manifest.decode("utf-8", errors="replace")
+                        source["url"] = response.url
+                if not _hls_manifest(manifest, source):
+                    raise RuntimeError("This playlist requires completed downloading")
+                source["hls_media_playlist_data"] = manifest
+                base = HlsFD
+            else:
+                base = DashSegmentsFD
+
+            class NativePipe(base):
+                def sanitize_open(self, filename, mode):
+                    if filename == str(fifo):
+                        return output, filename
+                    return super().sanitize_open(filename, mode)
+
+                def filesize_or_none(self, filename):
+                    return output.bytes_written if filename == str(fifo) else super().filesize_or_none(filename)
+
+                def _prepare_frag_download(self, context):
+                    super()._prepare_frag_download(context)
+
+                    def fragment_progress(update):
+                        if stopped.is_set():
+                            raise RuntimeError("Fragment copying stopped")
+                        if max(update.get("downloaded_bytes") or 0, update.get("total_bytes") or 0) > MAX_FRAGMENT_SIZE:
+                            raise RuntimeError("The fragment is too large to stream")
+
+                    context["dl"].add_progress_hook(fragment_progress)
+
+                def _read_fragment(self, context):
+                    filename = context.get("fragment_filename_sanitized")
+                    if filename and Path(filename).stat().st_size > MAX_FRAGMENT_SIZE:
+                        raise RuntimeError("The fragment is too large to stream")
+                    return super()._read_fragment(context)
+
+                def _download_fragment(self, context, url, info, headers=None, request_data=None):
+                    if stopped.is_set():
+                        raise RuntimeError("Fragment copying stopped")
+                    return super()._download_fragment(context, url, info, headers, request_data)
+
+            downloader = NativePipe(ydl, options)
+            result, _ = downloader.download(str(fifo), source)
+            if not result:
+                raise RuntimeError("A media fragment could not be downloaded")
+    except Exception as exc:
+        errors.append(type(exc).__name__)
+    finally:
+        for fragment in fifo.parent.glob(fifo.name + "-Frag*"):
+            fragment.unlink(missing_ok=True)
+
+
 def _copy_source(
     fmt: dict, fifo: Path, proxy: str, cookies: CookieJar,
     stopped: threading.Event, errors: list[str],
 ) -> None:
-    _copy_http_source(fmt, fifo, proxy, cookies, stopped, errors)
+    copier = _copy_segments if fmt.get("protocol") in SEGMENT_PROTOCOLS else _copy_http_source
+    copier(fmt, fifo, proxy, cookies, stopped, errors)
+
+
+def _remux_command(fifos: list[Path], formats: list[dict]) -> list[str]:
+    command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"]
+    for fifo in fifos:
+        command.extend(["-i", str(fifo)])
+    command.extend(["-map", "0:v:0", "-map", "1:a:0" if len(fifos) == 2 else "0:a:0?"])
+    command.extend(["-c", "copy"])
+    if any(fmt.get("protocol") in {"m3u8", "m3u8_native"} for fmt in formats):
+        # AAC in transport-stream fragments needs its framing converted for MP4.
+        command.extend(["-bsf:a", "aac_adtstoasc"])
+    command.extend(["-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"])
+    return command
 
 
 def main() -> int:
@@ -194,11 +337,7 @@ def main() -> int:
         os.mkfifo(fifo, 0o600)
     print(json.dumps(header), flush=True)
 
-    command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"]
-    for fifo in fifos:
-        command.extend(["-i", str(fifo)])
-    command.extend(["-map", "0:v:0", "-map", "1:a:0" if len(fifos) == 2 else "0:a:0?"])
-    command.extend(["-c", "copy", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"])
+    command = _remux_command(fifos, formats)
     errors: list[str] = []
     stopped = threading.Event()
     workers = []

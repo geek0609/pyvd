@@ -1,12 +1,12 @@
-import errno
 import io
 import json
 import os
 import threading
+from contextlib import contextmanager
 from http.cookiejar import Cookie, CookieJar
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.request import Request
 
 import pytest
 
@@ -255,3 +255,157 @@ def test_non_streamable_media_keeps_details_for_normal_downloading(monkeypatch, 
     assert stream_worker.main() == 0
     assert load_extraction(tmp_path, request, backend) is not None
     assert not list(tmp_path.glob("*.fifo"))
+
+
+def test_dash_keeps_the_exact_selected_video_and_audio_fragments() -> None:
+    video = {
+        "url": "https://cdn.example/video.mpd", "protocol": "http_dash_segments", "ext": "mp4",
+        "vcodec": "avc1.640028", "height": 1080, "format_id": "selected-video",
+        "fragment_base_url": "https://cdn.example/", "fragments": [{"path": "init.m4s"}, {"path": "video.m4s"}],
+    }
+    audio = {
+        "url": "https://cdn.example/audio.mpd", "protocol": "http_dash_segments", "ext": "m4a",
+        "acodec": "mp4a.40.2", "format_id": "selected-audio",
+        "fragments": [{"url": "https://cdn.example/audio.m4s"}],
+    }
+    assert stream_worker._formats({"requested_formats": [video, audio]}) == [video, audio]
+    assert stream_worker._formats({"requested_formats": [video, {**audio, "acodec": "opus"}]}) is None
+
+
+@pytest.mark.parametrize("changes", [
+    {"is_live": True}, {"has_drm": True}, {"live_status": "post_live"},
+    {"is_from_start": True}, {"protocol": "http_dash_segments_generator"},
+    {"fragments": "generator"}, {"fragments": iter([{"url": "https://cdn.example/part.m4s"}])},
+    {"fragments": [{"url": "https://cdn.example/part.m4s", "decrypt_info": {"METHOD": "AES-128"}}]},
+])
+def test_live_drm_and_unbounded_dash_keep_completed_downloading(changes) -> None:
+    source = {
+        "url": "https://cdn.example/video.mpd", "protocol": "http_dash_segments", "ext": "mp4",
+        "vcodec": "avc1.640028", "acodec": "none",
+        "fragments": [{"url": "https://cdn.example/part.m4s"}],
+    }
+    assert stream_worker._formats({**source, **changes}) is None
+
+
+@pytest.mark.parametrize("manifest", [
+    "#EXTM3U\n#EXTINF:1,\nsegment.ts\n",  # No finite end marker.
+    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nvariant.m3u8\n#EXT-X-ENDLIST\n",
+    "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=key.bin\nsegment.ts\n#EXT-X-ENDLIST\n",
+    "#EXTM3U\n  #EXT-X-KEY:METHOD=SAMPLE-AES,URI=key.bin\nsegment.ts\n#EXT-X-ENDLIST\n",
+])
+def test_unsafe_hls_playlists_do_not_stream(manifest) -> None:
+    assert not stream_worker._hls_manifest(manifest, {})
+
+
+@contextmanager
+def media_server(payloads: dict[str, bytes]):
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.path, dict(self.headers)))
+            body = payloads.get(self.path)
+            if body is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def copy_native(
+    fmt: dict, tmp_path: Path, cookies: CookieJar | None = None,
+    stopped: threading.Event | None = None,
+):
+    fifo = tmp_path / "segments.fifo"
+    os.mkfifo(fifo)
+    received = []
+
+    def read():
+        with fifo.open("rb") as stream:
+            received.append(stream.read())
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    errors = []
+    stream_worker._copy_source(fmt, fifo, "", cookies or CookieJar(), stopped or threading.Event(), errors)
+    reader.join(timeout=3)
+    assert not reader.is_alive()
+    assert not list(tmp_path.glob("segments.fifo-Frag*"))
+    return received[0], errors
+
+
+@pytest.mark.parametrize("protocol", ["m3u8_native", "http_dash_segments"])
+def test_native_sources_preserve_fragments_headers_and_scoped_cookies(tmp_path: Path, protocol: str) -> None:
+    first = b"initialization and first fragment"
+    second = b"second fragment"
+    playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nfirst\n#EXTINF:1,\nsecond\n#EXT-X-ENDLIST\n"
+    cookies = CookieJar()
+    for domain in ("127.0.0.1", "unrelated.example"):
+        cookies.set_cookie(Cookie(
+            version=0, name="session", value=domain, port=None, port_specified=False,
+            domain=domain, domain_specified=True, domain_initial_dot=False,
+            path="/", path_specified=True, secure=False, expires=None, discard=True,
+            comment=None, comment_url=None, rest={},
+        ))
+    with media_server({"/media.m3u8": playlist, "/first": first, "/second": second}) as (base, requests):
+        fmt = {"url": base + "/media.m3u8", "protocol": protocol, "ext": "mp4", "http_headers": {"X-Media-Test": "selected"}}
+        if protocol == "http_dash_segments":
+            fmt["fragments"] = [{"url": base + "/first"}, {"url": base + "/second"}]
+        received, errors = copy_native(fmt, tmp_path, cookies)
+    assert not errors
+    assert received == first + second
+    assert {path for path, _ in requests} == ({"/first", "/second", "/media.m3u8"} if protocol == "m3u8_native" else {"/first", "/second"})
+    assert all(headers["X-Media-Test"] == "selected" for _, headers in requests)
+    assert all(headers["Cookie"] == "session=127.0.0.1" for _, headers in requests)
+
+
+@pytest.mark.parametrize("failure", ["missing", "oversized", "encrypted", "unbounded"])
+def test_native_failure_closes_fifo_and_cleans_fragments(tmp_path: Path, monkeypatch, failure: str) -> None:
+    playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nfirst\n#EXTINF:1,\nsecond\n#EXT-X-ENDLIST\n"
+    payloads = {"/first": b"first fragment", "/second": b"second fragment"}
+    if failure == "missing":
+        del payloads["/second"]
+    elif failure == "oversized":
+        monkeypatch.setattr(stream_worker, "MAX_FRAGMENT_SIZE", 4)
+    elif failure == "encrypted":
+        playlist = playlist.replace("#EXTINF:1,", "#EXT-X-KEY:METHOD=AES-128,URI=key.bin\n#EXTINF:1,", 1)
+    else:
+        playlist = playlist.replace("#EXT-X-ENDLIST\n", "")
+    payloads["/media.m3u8"] = playlist.encode()
+    with media_server(payloads) as (base, _requests):
+        received, errors = copy_native({"url": base + "/media.m3u8", "protocol": "m3u8_native", "ext": "mp4"}, tmp_path)
+    assert errors
+    assert received == (b"first fragment" if failure == "missing" else b"")
+
+
+def test_native_cancellation_stops_before_fetching_another_fragment(tmp_path: Path, monkeypatch) -> None:
+    stopped = threading.Event()
+    original_writer = stream_worker.PipeWriter
+
+    class StopAfterFragment(original_writer):
+        def write(self, data):
+            result = super().write(data)
+            stopped.set()
+            return result
+
+    monkeypatch.setattr(stream_worker, "PipeWriter", StopAfterFragment)
+    playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nfirst\n#EXTINF:1,\nsecond\n#EXT-X-ENDLIST\n"
+    with media_server({"/media.m3u8": playlist, "/first": b"first", "/second": b"second"}) as (base, requests):
+        received, errors = copy_native({"url": base + "/media.m3u8", "protocol": "m3u8_native", "ext": "mp4"}, tmp_path, stopped=stopped)
+    assert errors and received == b"first"
+    assert {path for path, _ in requests} == {"/media.m3u8", "/first"}
