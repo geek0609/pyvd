@@ -20,7 +20,7 @@ from internal.models.media import Media, MediaItem
 
 
 PART_SIZE = 512 * 1024
-STREAM_SITES = frozenset({"youtube", "tiktok", "twitter", "facebook"})
+STREAM_SITES = frozenset({"youtube", "tiktok", "twitter", "facebook", "instagram"})
 
 
 @dataclass
@@ -43,6 +43,7 @@ async def _upload_parts(
     total_bytes = 0
     buffered = bytearray()
     last_update = 0.0
+    started = False
 
     async def send_part(number: int, chunk: bytes, total_parts: int) -> None:
         result = await session.invoke(raw.functions.upload.SaveBigFilePart(
@@ -54,12 +55,15 @@ async def _upload_parts(
     async def check_tasks() -> None:
         nonlocal tasks
         done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            task.result()
+        results = await asyncio.gather(*done, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async with client.save_file_semaphore:
-        await session.start()
         try:
+            await session.start()
+            started = True
             with path.open("wb") as output:
                 while True:
                     chunk = await asyncio.wait_for(process.stdout.read(64 * 1024), timeout=180)
@@ -98,14 +102,17 @@ async def _upload_parts(
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            await session.stop()
+            if started or getattr(session, "connection", None) is not None:
+                await session.stop()
 
 
 async def try_stream_upload(
     client: Client, request: Request, settings: Settings, workdir: Path,
     status: types.Message | None = None,
 ) -> UploadedVideo | None:
-    if request.extractor_id not in STREAM_SITES or prefer_gallery(request):
+    if request.extractor_id not in STREAM_SITES or (
+        prefer_gallery(request) and request.extractor_id != "instagram"
+    ):
         return None
     if settings.site(request.extractor_id).edge_proxy:
         return None
@@ -154,7 +161,11 @@ async def try_stream_upload(
             except ProcessLookupError:
                 pass
             try:
-                await asyncio.wait_for(process.wait(), timeout=5)
+                await asyncio.wait_for(process.communicate(), timeout=5)
             except asyncio.TimeoutError:
                 os.killpg(process.pid, signal.SIGKILL)
-                await process.wait()
+                await process.communicate()
+        elif not completed:
+            await process.communicate()
+        if not completed:
+            (workdir / "streamed.mp4").unlink(missing_ok=True)

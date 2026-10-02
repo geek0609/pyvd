@@ -43,12 +43,13 @@ and keep `/setjoingroups` enabled. Telegram then delivers ordinary group
 messages to the bot. A bot made group admin receives all group messages even
 with Privacy Mode enabled; grant admin rights only if link deletion is needed.
 
-For compatible H.264/AAC videos from YouTube, TikTok, X, and Facebook, PyVD
+For compatible H.264/AAC videos from YouTube, TikTok, X, Facebook, and Instagram, PyVD
 uploads Telegram parts while it downloads and remuxes the source. This includes
 YouTube videos and Shorts with separate video and audio tracks, without reducing
 the selected quality. Telegram sends the message after the final part arrives.
-Other sites, formats that need more processing, albums, and posts using cookie
-files use the normal completed-download path.
+Cookie files are supported, and Instagram uses the same merged MP4 source as
+its normal downloader. Other sites, formats that need more processing, and
+albums use the normal completed-download path.
 
 ```sh
 uv sync --locked --extra test --python 3.12
