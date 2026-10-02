@@ -164,7 +164,7 @@ class JobRunner:
             raise MediaError("This site is disabled by configuration.")
         if any(pattern.search(request.url) for pattern in site.ignore_regex):
             raise MediaError("This link is ignored by the site configuration.")
-        async with self._lock(request.key), self.capacity:
+        async with self._lock(request.key):
             cached = await self.store.cached_media(request.extractor_id, request.content_id) if self.settings.caching else None
             if cached and stale_video_cache(cached):
                 cached = None
@@ -192,60 +192,71 @@ class JobRunner:
                     if not any(part in code for part in ("FILE_ID_INVALID", "FILE_REFERENCE", "MEDIA_EMPTY", "FILE_ID")):
                         raise
 
-            await self._status(status, "Downloading media…")
-            self.settings.downloads_dir.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="pyvd-", dir=self.settings.downloads_dir) as directory:
-                workdir = Path(directory)
-                streamed = await try_stream_upload(self.client, request, self.settings, workdir, status)
-                if streamed:
-                    media = streamed.media
-                    media.nsfw = media.nsfw or marked_nsfw
-                    check_group_nsfw(media, chat, public_group, marked_nsfw)
-                    await self._status(status, "Preparing media…")
-                    try:
-                        media = await prepare(media, self.settings)
-                    except MediaError:
-                        pass
-                    else:
-                        if media.items[0].delivery_kind == "video":
-                            send_spoiler = delivery_spoiler(
-                                media, chat, public_group, spoiler, marked_nsfw,
-                            )
-                            await self._status(status, "Sending media…")
-                            message = await self.sender.send_preuploaded_video(
-                                target_chat_id, media.items[0], streamed.file,
-                                format_caption(media, chat, self.settings, self.username),
-                                reply_to, chat.silent, send_spoiler,
-                            )
-                            if self.settings.caching:
-                                try:
-                                    await self.store.save_media(media)
-                                except Exception:
-                                    pass
-                            return Delivery(media, [message])
-                    (workdir / "streamed.mp4").unlink(missing_ok=True)
-                media = await download(request, self.settings, workdir)
+            async with self.capacity:
+                return await self._download_and_send(
+                    request, chat, target_chat_id, reply_to, spoiler, status,
+                    inline, public_group, marked_nsfw,
+                )
+
+    async def _download_and_send(
+        self, request: Request, chat: ChatSettings, target_chat_id: int,
+        reply_to: int | None, spoiler: bool, status: types.Message | None,
+        inline: bool, public_group: bool, marked_nsfw: bool,
+    ) -> Delivery:
+        await self._status(status, "Downloading media…")
+        self.settings.downloads_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="pyvd-", dir=self.settings.downloads_dir) as directory:
+            workdir = Path(directory)
+            streamed = await try_stream_upload(self.client, request, self.settings, workdir, status)
+            if streamed:
+                media = streamed.media
                 media.nsfw = media.nsfw or marked_nsfw
-                if inline and len(media.items) != 1:
-                    raise MediaError("Inline mode supports one media item per link.")
-                if chat.kind == "group" and len(media.items) > chat.media_album_limit:
-                    raise MediaError("This post exceeds this group's album limit.")
                 check_group_nsfw(media, chat, public_group, marked_nsfw)
                 await self._status(status, "Preparing media…")
-                media = await prepare(media, self.settings)
-                send_spoiler = delivery_spoiler(
-                    media, chat, public_group, spoiler, marked_nsfw,
-                )
-                await self._status(status, "Uploading media…")
-                messages = await self.sender.send(
-                    target_chat_id, media,
-                    format_caption(media, chat, self.settings, self.username),
-                    reply_to=reply_to, silent=chat.silent,
-                    spoiler=send_spoiler, status=status,
-                )
-                if self.settings.caching:
-                    try:
-                        await self.store.save_media(media)
-                    except Exception:
-                        pass
-                return Delivery(media, messages)
+                try:
+                    media = await prepare(media, self.settings)
+                except MediaError:
+                    pass
+                else:
+                    if media.items[0].delivery_kind == "video":
+                        send_spoiler = delivery_spoiler(
+                            media, chat, public_group, spoiler, marked_nsfw,
+                        )
+                        await self._status(status, "Sending media…")
+                        message = await self.sender.send_preuploaded_video(
+                            target_chat_id, media.items[0], streamed.file,
+                            format_caption(media, chat, self.settings, self.username),
+                            reply_to, chat.silent, send_spoiler,
+                        )
+                        if self.settings.caching:
+                            try:
+                                await self.store.save_media(media)
+                            except Exception:
+                                pass
+                        return Delivery(media, [message])
+                (workdir / "streamed.mp4").unlink(missing_ok=True)
+            media = await download(request, self.settings, workdir)
+            media.nsfw = media.nsfw or marked_nsfw
+            if inline and len(media.items) != 1:
+                raise MediaError("Inline mode supports one media item per link.")
+            if chat.kind == "group" and len(media.items) > chat.media_album_limit:
+                raise MediaError("This post exceeds this group's album limit.")
+            check_group_nsfw(media, chat, public_group, marked_nsfw)
+            await self._status(status, "Preparing media…")
+            media = await prepare(media, self.settings)
+            send_spoiler = delivery_spoiler(
+                media, chat, public_group, spoiler, marked_nsfw,
+            )
+            await self._status(status, "Uploading media…")
+            messages = await self.sender.send(
+                target_chat_id, media,
+                format_caption(media, chat, self.settings, self.username),
+                reply_to=reply_to, silent=chat.silent,
+                spoiler=send_spoiler, status=status,
+            )
+            if self.settings.caching:
+                try:
+                    await self.store.save_media(media)
+                except Exception:
+                    pass
+            return Delivery(media, messages)
