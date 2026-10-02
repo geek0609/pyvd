@@ -1,7 +1,7 @@
 # PyVD improvements
 
 - [x] Honor selected HTTP chunk sizes without changing video quality.
-- [ ] Resume safe HTTP transfers with bounded retries.
+- [x] Resume safe HTTP transfers with bounded retries.
 - [ ] Schedule chats fairly and let requesters cancel their jobs.
 - [ ] Cache extracted music by video identity.
 - [ ] Stream compatible finite HLS/DASH and other named providers.

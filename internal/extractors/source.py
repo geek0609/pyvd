@@ -18,6 +18,15 @@ class SourceProtocolError(Exception):
     pass
 
 
+class _HTTPError(SourceProtocolError):
+    def __init__(self, status: int):
+        self.status = status
+
+
+RETRIES = 3
+RETRY_DELAY = 0.25
+
+
 class PipeWriter:
     def __init__(self, path: Path, stopped: threading.Event):
         self.name = str(path)
@@ -69,7 +78,7 @@ class PipeWriter:
 
 
 class _Response:
-    def __init__(self, offset: int, end: int | None, total: int | None):
+    def __init__(self, offset: int, end: int | None, total: int | None, validator: str | None = None):
         self.offset, self.end, self.total = offset, end, total
         self.status = 0
         self.headers: dict[str, str] = {}
@@ -77,6 +86,7 @@ class _Response:
         self.error: Exception | None = None
         self.validated = False
         self.range_supported = False
+        self.validator = validator
 
     def header(self, line: bytes) -> int:
         decoded = line.decode("latin-1").strip()
@@ -91,8 +101,16 @@ class _Response:
     def validate(self) -> None:
         if self.validated:
             return
+        if self.status not in {200, 206}:
+            raise _HTTPError(self.status)
         if self.headers.get("content-encoding", "identity").lower() != "identity":
             raise SourceProtocolError("Encoded media cannot be ranged safely")
+        validator = self.headers.get("etag")
+        if not validator or validator.startswith("W/"):
+            validator = self.headers.get("last-modified")
+        if self.validator and validator and validator != self.validator:
+            raise SourceProtocolError("The source changed during the media transfer")
+        self.validator = self.validator or validator
         if self.status == 200 and self.offset == 0:
             length = self.headers.get("content-length")
             self.expected = int(length) if length else None
@@ -127,6 +145,9 @@ def _copy_http(fmt: dict, output: PipeWriter, proxy: str, cookies: CookieJar) ->
     chunk = int((fmt.get("downloader_options") or {}).get("http_chunk_size") or 0)
     chunk = min(max(chunk, 0), 16 * 1024 * 1024)
     total = None
+    validator = None
+    failures = 0
+    range_supported = False
     state: _Response
 
     def header(line: bytes) -> int:
@@ -141,10 +162,12 @@ def _copy_http(fmt: dict, output: PipeWriter, proxy: str, cookies: CookieJar) ->
             end = offset + chunk - 1 if chunk else None
             if total is not None and end is not None:
                 end = min(end, total - 1)
-            state = _Response(offset, end, total)
+            state = _Response(offset, end, total, validator)
             request_headers = dict(headers)
             if chunk or offset:
                 request_headers["Range"] = f"bytes={offset}-{end if end is not None else ''}"
+            if offset and validator:
+                request_headers["If-Range"] = validator
 
             def write(data: bytes) -> int:
                 if 300 <= state.status < 400:
@@ -166,17 +189,44 @@ def _copy_http(fmt: dict, output: PipeWriter, proxy: str, cookies: CookieJar) ->
                 try:
                     if state.error is not None:
                         raise state.error
+                    state.validate()
                     response.raise_for_status()
                 finally:
                     response.close()
-            except Exception:
-                if state.error is not None:
-                    raise state.error from None
-                raise
+            except Exception as exc:
+                error = state.error or exc
+                transient = (
+                    isinstance(error, _HTTPError) and error.status in {408, 429, 500, 502, 503, 504}
+                ) or (
+                    isinstance(error, requests.exceptions.RequestException)
+                    and getattr(error, "code", None) in {5, 6, 7, 18, 28, 35, 52, 55, 56, 92}
+                )
+                resumable = output.bytes_written == 0 or range_supported or state.range_supported or (
+                    state.validated and state.validator
+                    and state.headers.get("accept-ranges", "").lower() == "bytes"
+                    and state.total is not None
+                )
+                if not transient or not resumable or failures >= RETRIES:
+                    raise error from None
+                if state.validated:
+                    total, validator = state.total, state.validator
+                    range_supported = range_supported or state.range_supported or bool(
+                        state.validator and state.headers.get("accept-ranges", "").lower() == "bytes"
+                    )
+                # A disconnect after every promised byte needs no replay.
+                if total is not None and output.bytes_written == total:
+                    return
+                if output.stopped.wait(RETRY_DELAY * 2 ** failures):
+                    raise SourceCancelled from None
+                failures += 1
+                continue
             state.validate()
             if state.expected is not None and output.bytes_written - offset != state.expected:
                 raise SourceProtocolError("The source returned incomplete media")
             total = state.total
+            validator = state.validator
+            range_supported = state.range_supported
+            failures = 0
             if not state.range_supported or output.bytes_written == total:
                 return
         raise SourceCancelled
