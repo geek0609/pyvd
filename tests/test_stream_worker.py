@@ -163,75 +163,16 @@ def test_real_gallery_data_can_be_saved_for_replay_without_path_objects(monkeypa
         config._config.update(previous_config)
 
 
-@pytest.mark.parametrize("fails", [False, True])
-def test_source_copy_is_bounded_and_keeps_domain_scoped_cookies(monkeypatch, tmp_path: Path, fails: bool) -> None:
-    from curl_cffi import requests
-
-    captured = {}
-
-    class Session:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            pass
-
-        def get(self, url, **kwargs):
-            captured.update(kwargs)
-            assert kwargs["content_callback"](b"video bytes") == 11
-            if fails:
-                raise RuntimeError("connection interrupted")
-            return SimpleNamespace(raise_for_status=lambda: None, close=lambda: None)
-
-    monkeypatch.setattr(requests, "Session", Session)
+def test_direct_sources_delegate_to_the_http_copier(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+    monkeypatch.setattr(stream_worker, "_copy_http_source", lambda *args: calls.append(args))
+    fmt = {"url": "https://cdn.example/video.mp4", "http_headers": {"Referer": "https://instagram.com/"}}
     fifo = tmp_path / "source.fifo"
-    os.mkfifo(fifo)
-    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
-    errors = []
     cookies = cookie_jar()
-    try:
-        stream_worker._copy_source(
-            {"url": "https://cdn.example/video.mp4", "http_headers": {"Referer": "https://instagram.com/"}},
-            fifo, "http://proxy.example", cookies, threading.Event(), errors,
-        )
-        assert os.read(reader, 100) == b"video bytes"
-        assert os.read(reader, 100) == b""  # Writer closes even after a failed source.
-    finally:
-        os.close(reader)
-    assert errors == (["RuntimeError"] if fails else [])
-    assert "stream" not in captured and captured["proxy"] == "http://proxy.example"
-    assert captured["timeout"] is None  # Upload backpressure must not impose a transfer deadline.
-    assert captured["cookies"] is not cookies
-    for url, expected in (
-        ("https://cdn.example/video.mp4", ".cdn.example"),
-        ("https://www.instagram.com/", ".instagram.com"),
-        ("https://unrelated.example/", None),
-    ):
-        request = Request(url)
-        captured["cookies"].add_cookie_header(request)
-        assert request.get_header("Cookie") == (f"session={expected}" if expected else None)
-
-
-def test_source_wait_for_ffmpeg_can_be_cancelled(monkeypatch, tmp_path: Path) -> None:
-    waiting = threading.Event()
     stopped = threading.Event()
-    def open_fifo(*args):
-        waiting.set()
-        raise OSError(errno.ENXIO, "no reader")
-
-    monkeypatch.setattr(stream_worker.os, "open", open_fifo)
     errors = []
-    worker = threading.Thread(target=stream_worker._copy_source, args=(
-        {"url": "https://cdn.example/video.mp4"}, tmp_path / "source.fifo", "", CookieJar(), stopped, errors,
-    ))
-    worker.start()
-    assert waiting.wait(timeout=1)
-    stopped.set()
-    worker.join(timeout=1)
-    assert not worker.is_alive() and not errors
+    stream_worker._copy_source(fmt, fifo, "http://proxy.example", cookies, stopped, errors)
+    assert calls == [(fmt, fifo, "http://proxy.example", cookies, stopped, errors)]
 
 
 @pytest.mark.parametrize("source_fails", [False, True])

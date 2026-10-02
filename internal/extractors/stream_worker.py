@@ -1,11 +1,9 @@
 """Extract a direct video source and remux it to a fragmented MP4 pipe."""
 
 import copy
-import errno
 import json
 import logging
 import os
-import select
 import subprocess
 import sys
 import threading
@@ -18,6 +16,7 @@ from internal.extractors.cookies import job_cookie_file
 from internal.extractors.downloader import DEFAULT_FORMAT, H264_FORMAT, _SilentYtdlpLogger
 from internal.extractors.extracted import save_extraction
 from internal.extractors.sites import Request
+from internal.extractors.source import copy_source as _copy_http_source
 
 
 def _source(fmt: dict, *, video: bool) -> bool:
@@ -144,49 +143,7 @@ def _copy_source(
     fmt: dict, fifo: Path, proxy: str, cookies: CookieJar,
     stopped: threading.Event, errors: list[str],
 ) -> None:
-    from curl_cffi import requests
-
-    descriptor = None
-    try:
-        while not stopped.is_set():
-            try:
-                descriptor = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
-                break
-            except OSError as exc:
-                if exc.errno != errno.ENXIO:
-                    raise
-                stopped.wait(0.05)
-        if descriptor is None:
-            return
-
-        def write(chunk: bytes) -> int:
-            pending = memoryview(chunk)
-            while pending:
-                if stopped.is_set():
-                    raise RuntimeError("Video source copying stopped")
-                try:
-                    written = os.write(descriptor, pending)
-                except BlockingIOError:
-                    select.select([], [descriptor], [], 0.1)
-                else:
-                    pending = pending[written:]
-            return len(chunk)
-
-        # A callback applies pipe backpressure directly without buffering the full response.
-        with requests.Session(cookies=_copy_cookies(cookies), trust_env=False) as session:
-            response = session.get(
-                fmt["url"], headers=fmt.get("http_headers") or {},
-                proxy=proxy or None, content_callback=write, timeout=None,
-            )
-            try:
-                response.raise_for_status()
-            finally:
-                response.close()
-    except Exception as exc:
-        errors.append(type(exc).__name__)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+    _copy_http_source(fmt, fifo, proxy, cookies, stopped, errors)
 
 
 def main() -> int:
