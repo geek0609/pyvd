@@ -9,6 +9,8 @@ from pathlib import Path
 from internal.config.settings import Settings
 from internal.core.errors import AuthenticationRequired, FileTooLarge, MediaError, NoAttachments, NoMedia
 from internal.extractors.cookies import job_cookie_file
+from internal.extractors.extracted import load_extraction
+from internal.extractors.gallery_worker import replay_messages
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
 
@@ -95,8 +97,15 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
     if site.edge_proxy:
         raise NoMedia("This site's edge proxy setting is not supported by PyVD.")
     gallery_dir = workdir / "gallery"
-    gallery_dir.mkdir()
-    cookie = job_cookie_file(settings, request.extractor_id, workdir)
+    gallery_dir.mkdir(exist_ok=True)
+    replay = request.extractor_id == "instagram" and replay_messages(
+        load_extraction(workdir, request, "gallery"),
+    ) is not None
+    existing_cookie = workdir / "cookies.txt"
+    cookie = (
+        existing_cookie if existing_cookie.is_file()
+        else job_cookie_file(settings, request.extractor_id, workdir)
+    ) if not replay else None
     command = [
         sys.executable, "-m", "gallery_dl", "--config-ignore", "--quiet",
         "--destination", str(gallery_dir), "--range", "1-21",
@@ -121,10 +130,27 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
     if cookie:
         command.extend(["--cookies", str(cookie)])
     command.append(request.url)
+    job = None
+    if replay:
+        command = [sys.executable, "-m", "internal.extractors.gallery_worker"]
+        job = json.dumps({
+            "root": str(settings.root), "workdir": str(workdir),
+            "extractor_id": request.extractor_id,
+            "content_id": request.content_id, "url": request.url,
+        }).encode()
     process = await asyncio.create_subprocess_exec(
         *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.PIPE if replay else asyncio.subprocess.DEVNULL,
     )
-    output_task = asyncio.create_task(process.communicate())
+
+    def stop_process() -> None:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+
+    output_task = asyncio.create_task(process.communicate(job) if replay else process.communicate())
     try:
         while not output_task.done():
             try:
@@ -133,19 +159,27 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
                 pass
             for path in gallery_dir.rglob("*"):
                 if path.is_file() and path.stat().st_size > settings.max_file_size:
-                    process.kill()
+                    stop_process()
                     await output_task
                     raise FileTooLarge("The file exceeds the 2 GB limit.")
             if shutil.disk_usage(workdir).free < 512_000_000:
-                process.kill()
+                stop_process()
                 await output_task
                 raise NoMedia("Not enough free disk space for this download.")
         _, stderr = await output_task
     finally:
         if process.returncode is None:
-            process.kill()
+            stop_process()
             await process.wait()
     paths = files_in(gallery_dir)
+    if len(paths) > 20:
+        raise MediaError("The post contains more than 20 media items.")
+    if any(path.stat().st_size > settings.max_file_size for path in paths):
+        raise FileTooLarge("The file exceeds the 2 GB limit.")
+    if replay and process.returncode:
+        shutil.rmtree(gallery_dir)
+        (workdir / "extracted.json").unlink(missing_ok=True)
+        return await download_gallery(request, settings, workdir)
     if not paths:
         if request.extractor_id == "instagram" and b"redirect to login page" in stderr.lower():
             raise AuthenticationRequired(
@@ -157,8 +191,6 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
         ):
             raise NoAttachments("This post has no attached media.")
         raise NoMedia("No media was found by the gallery extractor.")
-    if len(paths) > 20:
-        raise MediaError("The post contains more than 20 media items.")
     media = Media(
         request.extractor_id, request.content_id, request.url,
         caption=_caption(gallery_dir), nsfw=_marked_nsfw(gallery_dir),

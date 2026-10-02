@@ -215,6 +215,8 @@ class JobRunner:
                 await self._status(status, "Preparing media…")
                 try:
                     media = await prepare(media, self.settings)
+                except (DurationTooLong, FileTooLarge):
+                    raise
                 except MediaError:
                     pass
                 else:

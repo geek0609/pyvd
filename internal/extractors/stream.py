@@ -125,7 +125,8 @@ async def try_stream_upload(
     try:
         job = {
             "root": str(settings.root), "workdir": str(workdir),
-            "extractor_id": request.extractor_id, "url": request.url,
+            "extractor_id": request.extractor_id, "content_id": request.content_id,
+            "url": request.url,
         }
         process.stdin.write((json.dumps(job) + "\n").encode())
         await process.stdin.drain()

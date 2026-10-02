@@ -10,6 +10,7 @@ from internal.core.errors import (
     AuthenticationRequired, DurationTooLong, FileTooLarge, MediaError, NoMedia, SessionCheckRequired,
 )
 from internal.extractors.cookies import job_cookie_file
+from internal.extractors.extracted import load_extraction
 from internal.extractors.gallery import download_gallery, prefer_gallery
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
@@ -120,7 +121,12 @@ def _download(request: Request, settings: Settings, workdir: Path, use_cookies: 
     import yt_dlp
 
     site = settings.site(request.extractor_id)
-    cookie = job_cookie_file(settings, request.extractor_id, workdir) if use_cookies else None
+    extracted = load_extraction(workdir, request, "yt-dlp") if use_cookies else None
+    existing_cookie = workdir / "cookies.txt"
+    cookie = (
+        existing_cookie if extracted and existing_cookie.is_file()
+        else job_cookie_file(settings, request.extractor_id, workdir)
+    ) if use_cookies else None
 
     def progress(update: dict[str, Any]) -> None:
         if update.get("status") == "downloading":
@@ -166,7 +172,16 @@ def _download(request: Request, settings: Settings, workdir: Path, use_cookies: 
         raise MediaError("This site's edge proxy setting is not supported by PyVD.")
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(request.url, download=True)
+            if extracted:
+                try:
+                    info = ydl.process_ie_result(extracted, download=True)
+                except (yt_dlp.utils.DownloadError, yt_dlp.utils.ReExtractInfo) as exc:
+                    if any(part in str(exc).lower() for part in ("larger than max-filesize", "longer than")):
+                        raise
+                    # A signed source URL can expire; refresh only after replay fails.
+                    info = ydl.extract_info(request.url, download=True)
+            else:
+                info = ydl.extract_info(request.url, download=True)
     except FileTooLarge:
         raise
     except yt_dlp.utils.DownloadError as exc:

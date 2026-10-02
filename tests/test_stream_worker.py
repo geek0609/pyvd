@@ -11,6 +11,9 @@ from urllib.request import Request
 import pytest
 
 from internal.extractors import stream_worker
+from internal.extractors.extracted import load_extraction
+from internal.extractors.extracted import save_extraction
+from internal.extractors.sites import Request as MediaRequest
 
 
 def cookie_jar() -> CookieJar:
@@ -128,6 +131,38 @@ def test_instagram_extraction_keeps_all_records_headers_and_scoped_cookies(monke
     assert cookies is not extraction.extractor.session.cookies
 
 
+def test_real_gallery_data_can_be_saved_for_replay_without_path_objects(monkeypatch, tmp_path: Path) -> None:
+    import copy
+
+    from gallery_dl import config, job
+    from gallery_dl.extractor.common import Extractor
+
+    previous_config = copy.deepcopy(config._config)
+    request = MediaRequest("instagram", "post", "https://www.instagram.com/p/post/")
+
+    class Post(Extractor):
+        category = "instagram"
+        subcategory = "post"
+        pattern = r"https://www\.instagram\.com/p/(post)/"
+
+        def items(self):
+            yield 2, "", {"count": 1}
+            yield 3, "https://cdn.example/video.mp4", {"video_url": "https://cdn.example/video.mp4"}
+
+    original_job = job.DataJob
+    monkeypatch.setattr(job, "DataJob", lambda url, **kwargs: original_job(Post.from_url(url), **kwargs))
+    try:
+        data, cookies = stream_worker._extract_instagram({"url": request.url}, None, "")
+        save_extraction(tmp_path, request, "gallery", data, cookies)
+        saved = load_extraction(tmp_path, request, "gallery")
+        assert saved is not None
+        assert "_path" not in saved[0][1]
+        assert saved[1][2]["_http_headers"]
+    finally:
+        config.clear()
+        config._config.update(previous_config)
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_source_copy_is_bounded_and_keeps_domain_scoped_cookies(monkeypatch, tmp_path: Path, fails: bool) -> None:
     from curl_cffi import requests
@@ -206,7 +241,10 @@ def test_worker_finishes_only_when_remux_and_sources_succeed(monkeypatch, tmp_pa
         site=lambda _: SimpleNamespace(edge_proxy="", download_proxy="", disable_proxy=True),
         max_duration=3600,
     )
-    job = {"root": str(tmp_path), "workdir": str(tmp_path), "extractor_id": "instagram", "url": "https://instagram.com/reel/post"}
+    job = {
+        "root": str(tmp_path), "workdir": str(tmp_path), "extractor_id": "instagram",
+        "content_id": "post", "url": "https://instagram.com/reel/post",
+    }
     monkeypatch.setattr(stream_worker.sys, "stdin", io.StringIO(json.dumps(job)))
     monkeypatch.setattr(stream_worker, "load_settings", lambda _: settings)
     monkeypatch.setattr(stream_worker, "job_cookie_file", lambda *_args: None)
@@ -236,6 +274,43 @@ def test_worker_finishes_only_when_remux_and_sources_succeed(monkeypatch, tmp_pa
     monkeypatch.setattr(stream_worker.subprocess, "Popen", FFmpeg)
     monkeypatch.setattr(stream_worker, "_copy_source", copy_source)
     assert stream_worker.main() == (1 if source_fails else 0)
+    saved = load_extraction(tmp_path, MediaRequest("instagram", "post", job["url"]), "gallery")
+    assert saved[1][1] == url  # The fallback can reuse details even after remux/source failure.
     assert "0:a:0?" in commands[0]
     assert commands[0][commands[0].index("-c") + 1] == "copy"
+    assert not list(tmp_path.glob("*.fifo"))
+
+
+@pytest.mark.parametrize("site", ["youtube", "instagram"])
+def test_non_streamable_media_keeps_details_for_normal_downloading(monkeypatch, tmp_path: Path, site) -> None:
+    monkeypatch.setattr(stream_worker.logging, "disable", lambda _level: None)
+    settings = SimpleNamespace(
+        site=lambda _: SimpleNamespace(edge_proxy="", download_proxy="", disable_proxy=True),
+        max_duration=3600,
+    )
+    request = MediaRequest(site, "post", f"https://example.com/{site}/post")
+    job = {
+        "root": str(tmp_path), "workdir": str(tmp_path), "extractor_id": site,
+        "content_id": request.content_id, "url": request.url,
+    }
+    monkeypatch.setattr(stream_worker.sys, "stdin", io.StringIO(json.dumps(job)))
+    monkeypatch.setattr(stream_worker, "load_settings", lambda _: settings)
+    monkeypatch.setattr(stream_worker, "job_cookie_file", lambda *_args: None)
+    if site == "youtube":
+        backend = "yt-dlp"
+        monkeypatch.setattr(stream_worker, "_extract_ytdlp", lambda *_args: (
+            {"id": "post", "vcodec": "vp9", "url": "https://cdn.example/video.webm"}, CookieJar(),
+        ))
+    else:
+        backend = "gallery"
+        monkeypatch.setattr(stream_worker, "_extract_instagram", lambda *_args: (
+            instagram_data(("https://cdn.example/photo.jpg", {"extension": "jpg"})), CookieJar(),
+        ))
+
+    def unexpected_remux(*_args, **_kwargs):
+        raise AssertionError("incompatible media should use the normal downloader")
+
+    monkeypatch.setattr(stream_worker.subprocess, "Popen", unexpected_remux)
+    assert stream_worker.main() == 0
+    assert load_extraction(tmp_path, request, backend) is not None
     assert not list(tmp_path.glob("*.fifo"))

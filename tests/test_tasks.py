@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from internal.core.errors import MediaError
+from internal.core.errors import DurationTooLong, FileTooLarge, MediaError
 from internal.core.tasks import JobRunner
 from internal.extractors.sites import Request
 from internal.models.media import ChatSettings, Media, MediaItem
@@ -252,3 +252,21 @@ async def test_inline_album_cache_downloads_under_capacity_and_enforces_single_i
 
     job.download.assert_awaited_once()
     job.sender.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [DurationTooLong("Too long"), FileTooLarge("Too large")])
+async def test_streamed_video_limit_errors_do_not_download_again(job, error: MediaError) -> None:
+    job.store.cached_media.return_value = None
+    job.store.cached_media.side_effect = None
+    job.stream.return_value = SimpleNamespace(media=job.downloaded, file="uploaded")
+    job.prepare.side_effect = error
+
+    with pytest.raises(type(error)) as exc:
+        await job.runner.run(job.request, job.chat, 123)
+
+    assert exc.value is error
+    job.download.assert_not_awaited()
+    job.sender.send.assert_not_awaited()
+    job.store.save_media.assert_not_awaited()
+    assert list(job.runner.settings.downloads_dir.iterdir()) == []

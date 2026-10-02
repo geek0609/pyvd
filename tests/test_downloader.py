@@ -6,6 +6,7 @@ import pytest
 
 from internal.core.errors import AuthenticationRequired, FileTooLarge, NoAttachments, NoMedia, SessionCheckRequired
 from internal.extractors import downloader
+from internal.extractors.extracted import save_extraction
 from internal.extractors.sites import Request
 from internal.models.media import Media
 
@@ -43,6 +44,98 @@ def test_downloaded_file_is_turned_into_media(tmp_path: Path, monkeypatch: pytes
     assert media.items[0].kind == "video"
     assert captured["format"].startswith("bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]")
     assert "node" in captured["js_runtimes"]
+
+
+@pytest.mark.parametrize("replay_error", [None, "expired", "oversized"])
+def test_extracted_details_are_reused_before_refreshing_the_source(
+    tmp_path: Path, monkeypatch, replay_error: str | None,
+) -> None:
+    import yt_dlp
+
+    request = Request("youtube", "video", "https://youtu.be/video")
+    save_extraction(tmp_path, request, "yt-dlp", {"id": "video", "title": "Saved details"})
+    calls = []
+    options = {}
+
+    def downloaded():
+        path = tmp_path / "001-video.mp4"
+        path.write_bytes(b"video")
+        return {"title": "Saved details", "requested_downloads": [{"filepath": str(path)}]}
+
+    class FakeYDL:
+        def __init__(self, opts):
+            options.update(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def process_ie_result(self, info, download):
+            calls.append("replay")
+            assert info["id"] == request.content_id
+            assert download is True
+            if replay_error:
+                reason = "larger than max-filesize" if replay_error == "oversized" else "HTTP Error 403"
+                raise yt_dlp.utils.DownloadError(reason)
+            return downloaded()
+
+        def extract_info(self, url, download):
+            calls.append("refresh")
+            assert url == request.url and download is True
+            return downloaded()
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    if replay_error == "oversized":
+        with pytest.raises(FileTooLarge):
+            downloader._download(request, _settings(tmp_path), tmp_path)
+        assert calls == ["replay"]
+    else:
+        media = downloader._download(request, _settings(tmp_path), tmp_path)
+        assert media.caption == "Saved details"
+        assert calls == (["replay", "refresh"] if replay_error else ["replay"])
+    assert options["format"] == downloader.H264_FORMAT
+    assert options["max_filesize"] == 100
+    assert options["match_filter"]({"duration": 3601}) is not None
+    with pytest.raises(FileTooLarge):
+        options["progress_hooks"][0]({"status": "downloading", "downloaded_bytes": 101})
+
+
+def test_replay_retains_job_cookies_and_anonymous_retry_ignores_saved_details(tmp_path: Path, monkeypatch) -> None:
+    request = Request("instagram", "reel", "https://instagram.com/reel/reel/")
+    save_extraction(tmp_path, request, "yt-dlp", {"id": "reel"})
+    (tmp_path / "cookies.txt").write_text("updated job cookies")
+    captured = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            captured.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def result(self):
+            path = tmp_path / "001-reel.mp4"
+            path.write_bytes(b"video")
+            return {"requested_downloads": [{"filepath": str(path)}]}
+
+        def process_ie_result(self, info, download):
+            assert len(captured) == 1
+            return self.result()
+
+        def extract_info(self, url, download):
+            assert len(captured) == 2
+            return self.result()
+
+    monkeypatch.setattr("yt_dlp.YoutubeDL", FakeYDL)
+    downloader._download(request, _settings(tmp_path), tmp_path)
+    assert Path(captured[0]["cookiefile"]).read_text() == "updated job cookies"
+    downloader._download(request, _settings(tmp_path), tmp_path, use_cookies=False)
+    assert "cookiefile" not in captured[1]
 
 
 def test_marked_playlist_entry_marks_the_post() -> None:

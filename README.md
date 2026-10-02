@@ -51,6 +51,11 @@ Cookie files are supported, and Instagram uses the same merged MP4 source as
 its normal downloader. Other sites, formats that need more processing, and
 albums use the normal completed-download path.
 
+Cached Telegram media is sent without waiting for a download slot. When
+streaming falls back, PyVD reuses the extracted source details before fetching
+the post again. These details and copied cookies stay in the temporary job
+directory and are deleted when the job ends.
+
 ```sh
 uv sync --locked --extra test --python 3.12
 .venv/bin/python cmd/main.py --check

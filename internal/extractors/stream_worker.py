@@ -16,6 +16,8 @@ from urllib.parse import urlsplit
 from internal.config.settings import load_settings
 from internal.extractors.cookies import job_cookie_file
 from internal.extractors.downloader import DEFAULT_FORMAT, H264_FORMAT, _SilentYtdlpLogger
+from internal.extractors.extracted import save_extraction
+from internal.extractors.sites import Request
 
 
 def _source(fmt: dict, *, video: bool) -> bool:
@@ -78,6 +80,8 @@ def _extract_instagram(job: dict, cookie: Path | None, proxy: str) -> tuple[list
 
     config.clear()
     config.set(("output",), "private", True)
+    config.set(("extractor",), "metadata-path", False)
+    config.set(("extractor",), "metadata-extractor", False)
     config.set(("extractor", "instagram"), "videos", "merged")
     if cookie:
         config.set(("extractor",), "cookies", str(cookie))
@@ -196,13 +200,19 @@ def main() -> int:
     logging.disable(logging.CRITICAL)
     cookie = job_cookie_file(settings, job["extractor_id"], workdir)
     proxy = site.download_proxy or ("" if site.disable_proxy else site.proxy or settings.proxy)
+    request = Request(job["extractor_id"], job["content_id"], job["url"])
     try:
         if job["extractor_id"] == "instagram":
             gallery_data, cookies = _extract_instagram(job, cookie, proxy)
+            save_extraction(workdir, request, "gallery", gallery_data, cookies)
             selected = _instagram_video(gallery_data)
             info, formats = selected if selected else (None, None)
         else:
             info, cookies = _extract_ytdlp(job, settings, cookie, proxy)
+            if info:
+                import yt_dlp
+
+                save_extraction(workdir, request, "yt-dlp", yt_dlp.YoutubeDL.sanitize_info(info), cookies)
             formats = _formats(info) if info and info.get("entries") is None else None
     except Exception:
         print('{"available":false}', flush=True)
