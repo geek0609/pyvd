@@ -1,11 +1,14 @@
 """Download supported posts with yt-dlp, preserving govd cookie files."""
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
 from internal.config.settings import Settings
-from internal.core.errors import AuthenticationRequired, DurationTooLong, FileTooLarge, MediaError, NoMedia
+from internal.core.errors import (
+    AuthenticationRequired, DurationTooLong, FileTooLarge, MediaError, NoMedia, SessionCheckRequired,
+)
 from internal.extractors.cookies import job_cookie_file
 from internal.extractors.gallery import download_gallery, prefer_gallery
 from internal.extractors.sites import Request
@@ -13,11 +16,12 @@ from internal.models.media import Media, MediaItem
 
 
 DEFAULT_FORMAT = "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best"
-YOUTUBE_FORMAT = (
+H264_FORMAT = (
     "bv[ext=mp4][vcodec^=avc1]+ba[ext=m4a][acodec^=mp4a]/"
     "b[ext=mp4][vcodec^=avc1]/"
     "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/best"
 )
+INSTAGRAM_FORMAT = "b[ext=mp4]/" + H264_FORMAT
 
 
 class _SilentYtdlpLogger:
@@ -86,11 +90,37 @@ def _kind(path: Path, site: str, entry: dict[str, Any]) -> str:
     return "video"
 
 
-def _download(request: Request, settings: Settings, workdir: Path) -> Media:
+def _instagram_auth_error(error: Exception) -> AuthenticationRequired | None:
+    from yt_dlp.networking.exceptions import HTTPError
+
+    details = getattr(error, "exc_info", None)
+    if not details:
+        return None
+    cause = details[1]
+    if not isinstance(cause, HTTPError):
+        cause = getattr(cause, "cause", None)
+    if not isinstance(cause, HTTPError) or cause.status not in {400, 401, 403}:
+        return None
+    try:
+        body = json.loads(cause.response.read(65_536))
+    except Exception:
+        return None
+    message = body.get("message") if isinstance(body, dict) else None
+    if message in ("checkpoint_required", "challenge_required"):
+        return SessionCheckRequired(
+            "Instagram requires an account security check. The bot owner must "
+            "complete it and refresh the Instagram cookies."
+        )
+    if message == "login_required":
+        return AuthenticationRequired("Instagram rejected PyVD's login session. Refresh the Instagram cookies.")
+    return None
+
+
+def _download(request: Request, settings: Settings, workdir: Path, use_cookies: bool = True) -> Media:
     import yt_dlp
 
     site = settings.site(request.extractor_id)
-    cookie = job_cookie_file(settings, request.extractor_id, workdir)
+    cookie = job_cookie_file(settings, request.extractor_id, workdir) if use_cookies else None
 
     def progress(update: dict[str, Any]) -> None:
         if update.get("status") == "downloading":
@@ -120,8 +150,10 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
         "restrictfilenames": True,
         "ignoreerrors": False,
     }
+    if request.extractor_id == "instagram":
+        options["format"] = INSTAGRAM_FORMAT
     if request.extractor_id == "youtube":
-        options["format"] = YOUTUBE_FORMAT
+        options["format"] = H264_FORMAT
         options["js_runtimes"] = {"deno": {}, "node": {}}
     if cookie:
         options["cookiefile"] = str(cookie)
@@ -143,6 +175,10 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
             raise FileTooLarge("The file exceeds the 2 GB limit.") from exc
         if "longer than" in message.lower():
             raise DurationTooLong("The media exceeds the duration limit.") from exc
+        if request.extractor_id == "instagram":
+            auth_error = _instagram_auth_error(exc)
+            if auth_error is not None:
+                raise auth_error from exc
         raise NoMedia("Could not download media from this link.") from exc
     if not info:
         raise NoMedia("No media was found at this link.")
@@ -172,12 +208,12 @@ def _download(request: Request, settings: Settings, workdir: Path) -> Media:
     return media
 
 
-def _download_in_process(request: Request, settings: Settings, workdir: Path) -> Media:
+def _download_in_process(request: Request, settings: Settings, workdir: Path, use_cookies: bool = True) -> Media:
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
     with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as pool:
-        return pool.submit(_download, request, settings, workdir).result()
+        return pool.submit(_download, request, settings, workdir, use_cookies).result()
 
 
 async def download(request: Request, settings: Settings, workdir: Path) -> Media:
@@ -191,6 +227,11 @@ async def download(request: Request, settings: Settings, workdir: Path) -> Media
             pass
     try:
         return await asyncio.to_thread(_download_in_process, request, settings, workdir)
+    except SessionCheckRequired as checkpoint:
+        try:
+            return await asyncio.to_thread(_download_in_process, request, settings, workdir, False)
+        except NoMedia as exc:
+            raise checkpoint from exc
     except NoMedia:
         if auth_error is not None:
             raise auth_error

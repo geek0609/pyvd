@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from internal.config.settings import load_settings
 from internal.extractors.cookies import job_cookie_file
-from internal.extractors.downloader import DEFAULT_FORMAT, YOUTUBE_FORMAT
+from internal.extractors.downloader import DEFAULT_FORMAT, H264_FORMAT
 
 
 def _source(fmt: dict, *, video: bool) -> bool:
@@ -70,7 +70,7 @@ def main() -> int:
         return 0
     proxy = site.download_proxy or ("" if site.disable_proxy else site.proxy or settings.proxy)
     options = {
-        "format": YOUTUBE_FORMAT if job["extractor_id"] == "youtube" else DEFAULT_FORMAT,
+        "format": H264_FORMAT if job["extractor_id"] == "youtube" else DEFAULT_FORMAT,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,

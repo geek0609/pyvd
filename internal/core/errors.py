@@ -20,3 +20,7 @@ class NoAttachments(MediaError):
 
 class AuthenticationRequired(NoMedia):
     pass
+
+
+class SessionCheckRequired(AuthenticationRequired):
+    pass

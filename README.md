@@ -20,6 +20,11 @@ PyVD uses the govd `private/config.yaml` site overrides and
 download job so extractors cannot rewrite the originals. The existing govd
 database is used directly; PyVD does not run migrations.
 
+If Instagram requires an account security check, PyVD retries public posts
+without cookies. If that fails, it asks the bot owner to complete the check and
+refresh the cookies. Instagram downloads prefer merged MP4 videos, matching the
+gallery extractor's Telegram-compatible format.
+
 Additional yt-dlp sites use their lowercase extractor family as `<site>` in
 `private/cookies/<site>.txt` and `private/config.yaml`. Search `/extractors
 <name>` to see that identifier. Site availability is set in

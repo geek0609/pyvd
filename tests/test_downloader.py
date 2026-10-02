@@ -1,9 +1,10 @@
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from internal.core.errors import AuthenticationRequired, FileTooLarge, NoAttachments, NoMedia
+from internal.core.errors import AuthenticationRequired, FileTooLarge, NoAttachments, NoMedia, SessionCheckRequired
 from internal.extractors import downloader
 from internal.extractors.sites import Request
 from internal.models.media import Media
@@ -100,6 +101,83 @@ def test_additional_site_uses_its_own_cookie_file(tmp_path: Path, monkeypatch: p
     assert Path(captured["cookiefile"]).read_bytes() == original.read_bytes()
     assert Path(captured["cookiefile"]) != original
 
+    captured.clear()
+    instagram_cookie = cookies / "instagram.txt"
+    instagram_cookie.write_bytes(original.read_bytes())
+    downloader._download(
+        Request("instagram", "reel", "https://www.instagram.com/reel/reel/"),
+        settings, tmp_path, use_cookies=False,
+    )
+    assert "cookiefile" not in captured
+    assert captured["format"].startswith("b[ext=mp4]/bv[ext=mp4][vcodec^=avc1]")
+    assert instagram_cookie.read_text() == "# Netscape HTTP Cookie File\n"
+
+
+def test_instagram_prefers_merged_video_when_its_codec_metadata_is_missing() -> None:
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL({
+        "format": downloader.INSTAGRAM_FORMAT, "logger": downloader._SilentYtdlpLogger(),
+        "quiet": True, "check_formats": False,
+    }) as ydl:
+        result = ydl.process_ie_result({
+            "id": "reel", "title": "A reel", "formats": [
+                {"format_id": "3", "ext": "mp4", "vcodec": None, "acodec": None,
+                 "url": "https://example.com/merged.mp4"},
+                {"format_id": "dash-video", "ext": "mp4", "vcodec": "vp09.00.40.08", "acodec": "none",
+                 "width": 1080, "height": 1920, "url": "https://example.com/video.mp4"},
+                {"format_id": "dash-audio", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.5",
+                 "url": "https://example.com/audio.m4a"},
+            ],
+        }, download=False)
+    assert result["format_id"] == "3"
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "expected"),
+    [
+        (b'{"message":"checkpoint_required"}', 400, SessionCheckRequired),
+        (b'{"message":"challenge_required"}', 400, SessionCheckRequired),
+        (b'{"message":"login_required"}', 401, AuthenticationRequired),
+        (b'{"message":"feedback_required"}', 400, NoMedia),
+        (b'{"message":"checkpoint_required"}', 500, NoMedia),
+        (b'not JSON', 400, NoMedia),
+        (b'[]', 400, NoMedia),
+    ],
+)
+def test_instagram_http_errors_are_classified_without_exposing_response_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: bytes, status: int, expected: type,
+) -> None:
+    import yt_dlp
+    from yt_dlp.networking.common import Response
+    from yt_dlp.networking.exceptions import HTTPError
+
+    response = Response(BytesIO(body), "https://www.instagram.com/api/v1/media/123/info/", {}, status=status)
+    cause = HTTPError(response)
+    error = yt_dlp.utils.DownloadError("HTTP error", exc_info=(type(cause), cause, None))
+
+    class FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def extract_info(self, url, download):
+            raise error
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    with pytest.raises(expected) as exc:
+        downloader._download(
+            Request("instagram", "reel", "https://www.instagram.com/reel/reel/"), _settings(tmp_path), tmp_path,
+        )
+    assert type(exc.value) is expected
+    assert "https://" not in str(exc.value)
+    assert "checkpoint_required" not in str(exc.value)
+
 
 @pytest.mark.asyncio
 async def test_instagram_auth_error_survives_failed_ytdlp_fallback(
@@ -123,6 +201,43 @@ async def test_instagram_auth_error_survives_failed_ytdlp_fallback(
     media = Media("instagram", "reel", request.url)
     monkeypatch.setattr(downloader, "_download_in_process", lambda *args: media)
     assert await downloader.download(request, _settings(tmp_path), tmp_path) is media
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["public", "private", "oversized"])
+async def test_instagram_checkpoint_retries_without_cookies_and_preserves_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    request = Request("instagram", "reel", "https://www.instagram.com/reel/reel/")
+    checkpoint = SessionCheckRequired("Complete the Instagram security check.")
+    media = Media("instagram", "reel", request.url)
+    calls = []
+
+    async def gallery(*args):
+        raise NoMedia("HTTP 400")
+
+    def ytdlp(request, settings, workdir, use_cookies=True):
+        calls.append(use_cookies)
+        if use_cookies:
+            raise checkpoint
+        if outcome == "private":
+            raise NoMedia("Login required")
+        if outcome == "oversized":
+            raise FileTooLarge("The file exceeds the 2 GB limit.")
+        return media
+
+    monkeypatch.setattr(downloader, "download_gallery", gallery)
+    monkeypatch.setattr(downloader, "_download_in_process", ytdlp)
+    if outcome == "public":
+        assert await downloader.download(request, _settings(tmp_path), tmp_path) is media
+    elif outcome == "private":
+        with pytest.raises(SessionCheckRequired) as exc:
+            await downloader.download(request, _settings(tmp_path), tmp_path)
+        assert exc.value is checkpoint
+    else:
+        with pytest.raises(FileTooLarge):
+            await downloader.download(request, _settings(tmp_path), tmp_path)
+    assert calls == [True, False]
 
 
 @pytest.mark.asyncio
