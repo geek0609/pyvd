@@ -87,12 +87,17 @@ async def test_cancel_remains_responsive_and_only_requester_can_cancel():
     bot.runner = Runner()
     await asyncio.wait_for(bot.on_message(None, Message("https://youtu.be/YE7VzlLtp-4", 1, 7)), 1)
     await started.wait()
+    await bot.on_message(None, Message("/cancel 37531644963", 2, 7))
+    await bot.on_message(None, Message("/cancel", 2, 7))
+    await bot.on_message(None, Message("/cancel", 2, 7, 99))
     await bot.on_message(None, Message("/cancel", 2, 8, 1))
     assert not cleaned.is_set()
+    assert replies == []
     await bot.on_message(None, Message("/cancel", 3, 7, 1))
     await asyncio.wait_for(cleaned.wait(), 1)
     await bot.close()
-    assert replies == ["No active download of yours was found for that message.", "Cancelling your download."]
+    await bot.on_message(None, Message("/cancel", 4, 7, 1))
+    assert replies == ["Cancelling your download."]
     assert bot.runner.jobs.pending == 0
     assert not bot.job_tasks
 

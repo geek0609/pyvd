@@ -218,13 +218,8 @@ class Bot:
             original = getattr(message, "reply_to_message_id", None)
             if original is None:
                 original = getattr(getattr(message, "reply_to_message", None), "id", None)
-            if original is None:
-                reply = "Reply to your link or /music request with /cancel."
-            elif self.runner and self.runner.jobs.cancel(message.chat.id, original, user_id):
-                reply = "Cancelling your download."
-            else:
-                reply = "No active download of yours was found for that message."
-            await message.reply(reply, parse_mode=enums.ParseMode.DISABLED)
+            if original is not None and self.runner and self.runner.jobs.cancel(message.chat.id, original, user_id):
+                await message.reply("Cancelling your download.", parse_mode=enums.ParseMode.DISABLED)
             return
         if command == "/music":
             self._start_job(message, self._music_message(message, kind, public_group))
