@@ -233,6 +233,25 @@ async def test_marked_cached_video_keeps_group_spoiler_policy(job, public_group:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [False, True])
+async def test_x_inline_accepts_multiple_attachments_for_selection(job, cached) -> None:
+    request = Request("twitter", "123", "https://x.com/user/status/123")
+    job.runner.settings.caching = cached
+    for media in (job.cached, job.downloaded):
+        media.extractor_id = "twitter"
+        media.content_id = "123"
+        media.url = request.url
+        media.items.append(MediaItem("video", file_id="second", video_codec="avc", audio_codec="aac"))
+    result = await job.runner.run(request, job.chat, 123, inline=True, public_group=True)
+    assert len(result.media.items) == 2
+    job.sender.send.assert_awaited_once()
+    if cached:
+        job.download.assert_not_awaited()
+    else:
+        job.download.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_inline_album_cache_downloads_under_capacity_and_enforces_single_item(job) -> None:
     job.cached.items.append(MediaItem("photo", file_id="photo-id"))
     job.downloaded.items.append(MediaItem("photo", path=Path("photo.jpg")))

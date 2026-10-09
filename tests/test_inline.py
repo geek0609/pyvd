@@ -116,6 +116,104 @@ async def test_additional_sites_in_inline_queries_are_private_only(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("chat_type", [
+    enums.ChatType.GROUP, enums.ChatType.SUPERGROUP, enums.ChatType.CHANNEL,
+    enums.ChatType.PRIVATE, enums.ChatType.BOT, None,
+])
+async def test_x_inline_offers_each_attachment_in_every_chat_type(monkeypatch, chat_type) -> None:
+    probe = AsyncMock(return_value=2)
+    monkeypatch.setattr("internal.bot.inline.inline_item_count", probe)
+    settings = SimpleNamespace(
+        whitelist=frozenset(), caching=False, site=lambda _: SimpleNamespace(disabled=False),
+    )
+    query = SimpleNamespace(
+        query="https://x.com/Sachingupta/status/2108422571045925024", chat_type=chat_type,
+        from_user=SimpleNamespace(id=123), answer=AsyncMock(),
+    )
+    inline = Inline(SimpleNamespace(), settings, SimpleNamespace())
+    try:
+        await inline.query(None, query)
+        results = query.answer.call_args.args[0]
+        assert [result.title for result in results] == ["Share media 1 of 2", "Share media 2 of 2"]
+        assert len({result.id for result in results}) == 2
+        for index, result in enumerate(results):
+            pending = inline.pending[result.id]
+            assert pending.item_index == index
+            assert pending.public_group is (chat_type not in {enums.ChatType.PRIVATE, enums.ChatType.BOT})
+        probe.assert_awaited_once()
+    finally:
+        await inline.close()
+
+
+@pytest.mark.asyncio
+async def test_x_inline_queries_share_a_probe_by_post_not_user(monkeypatch) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def count(*args):
+        started.set()
+        await release.wait()
+        return 2
+
+    probe = AsyncMock(side_effect=count)
+    monkeypatch.setattr("internal.bot.inline.inline_item_count", probe)
+    settings = SimpleNamespace(
+        whitelist=frozenset(), caching=False, site=lambda _: SimpleNamespace(disabled=False),
+    )
+    inline = Inline(SimpleNamespace(), settings, SimpleNamespace())
+    queries = [SimpleNamespace(
+        query="https://x.com/user/status/123", chat_type=enums.ChatType.GROUP,
+        from_user=SimpleNamespace(id=user), answer=AsyncMock(),
+    ) for user in (123, 456)]
+    tasks = [asyncio.create_task(inline.query(None, query)) for query in queries]
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        release.set()
+        await asyncio.gather(*tasks)
+        probe.assert_awaited_once()
+        assert list(inline._counts) == ["twitter/123"]
+        for query in queries:
+            for result in query.answer.call_args.args[0]:
+                assert inline.pending[result.id].user_id == query.from_user.id
+    finally:
+        await inline.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [False, True])
+async def test_x_inline_delivers_selected_attachment_and_deletes_all_staging(monkeypatch, cached) -> None:
+    media = Media("twitter", "123", "https://x.com/user/status/123", items=[
+        MediaItem("video", file_id="first", video_codec="avc"),
+        MediaItem("video", file_id="second", video_codec="avc"),
+    ])
+    messages = [SimpleNamespace(delete=AsyncMock()) for _ in media.items]
+    store = SimpleNamespace(
+        chat=AsyncMock(return_value=ChatSettings(123, "private", False, False, False, 10, False)),
+        cached_media=AsyncMock(return_value=media),
+    )
+    inline = Inline(SimpleNamespace(), SimpleNamespace(caching=cached, captions_header=""), store)
+    inline.runner = SimpleNamespace(run=AsyncMock(return_value=Delivery(media, messages)))
+    replace = AsyncMock()
+    monkeypatch.setattr(inline, "_replace_media", replace)
+    task_id = inline.add(123, Request("twitter", "123", media.url), public_group=True, item_index=1)
+    await inline.chosen(None, SimpleNamespace(
+        result_id=task_id, from_user=SimpleNamespace(id=123), inline_message_id="message",
+    ))
+    await drain_inline(inline)
+    replace.assert_awaited_once_with("message", media.items[1], "")
+    if cached:
+        inline.runner.run.assert_not_awaited()
+        for message in messages:
+            message.delete.assert_not_awaited()
+    else:
+        assert inline.runner.run.call_args.kwargs["inline"] is True
+        assert inline.runner.run.call_args.kwargs["public_group"] is True
+        for message in messages:
+            message.delete.assert_awaited_once()
+    await inline.close()
+
+
+@pytest.mark.asyncio
 async def test_inline_download_button_starts_without_chosen_feedback() -> None:
     events = []
     bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), SimpleNamespace())
@@ -165,7 +263,8 @@ async def test_inline_download_button_rejects_other_user() -> None:
 
 
 @pytest.mark.asyncio
-async def test_group_inline_cannot_reuse_cached_marked_media() -> None:
+@pytest.mark.parametrize("site", ["youtube", "twitter"])
+async def test_group_inline_cannot_reuse_cached_marked_media(site) -> None:
     edits = []
 
     class Client:
@@ -181,15 +280,17 @@ async def test_group_inline_cannot_reuse_cached_marked_media() -> None:
 
         async def cached_media(self, extractor_id, content_id):
             return Media(
-                "youtube", "id", "https://youtu.be/YE7VzlLtp-4", nsfw=True,
-                items=[MediaItem(kind="video", file_id="cached", video_codec="avc")],
+                site, "id", "https://youtu.be/YE7VzlLtp-4", nsfw=True,
+                items=[MediaItem(kind="video", file_id="cached", video_codec="avc")]
+                * (2 if site == "twitter" else 1),
             )
 
     client = Client()
     inline = Inline(client, SimpleNamespace(caching=True), Store())
-    inline.runner = SimpleNamespace()
+    inline.runner = SimpleNamespace(run=AsyncMock())
+    inline._replace_media = AsyncMock()
     task_id = inline.add(
-        123, Request("youtube", "id", "https://youtu.be/YE7VzlLtp-4"), public_group=True,
+        123, Request(site, "id", "https://youtu.be/YE7VzlLtp-4"), public_group=True,
     )
     chosen = SimpleNamespace(
         result_id=task_id, from_user=SimpleNamespace(id=123), inline_message_id="message",
@@ -199,6 +300,8 @@ async def test_group_inline_cannot_reuse_cached_marked_media() -> None:
     assert edits == [
         "⚠️ This link is unavailable here. Send it to PyVD in a DM or private group."
     ]
+    inline.runner.run.assert_not_awaited()
+    inline._replace_media.assert_not_awaited()
 
 
 @pytest.mark.asyncio

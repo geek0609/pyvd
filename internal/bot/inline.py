@@ -4,6 +4,7 @@ import asyncio
 import json
 import secrets
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from urllib.request import Request as HttpRequest, urlopen
 
@@ -12,11 +13,12 @@ from hydrogram import Client, enums, types
 from internal.config.settings import Settings
 from internal.core.errors import MediaError, NoAttachments
 from internal.core.send import format_caption
-from internal.core.tasks import JobRunner, check_group_nsfw, stale_video_cache
+from internal.core.tasks import JobRunner, check_group_nsfw, inline_media_supported, stale_video_cache
 from internal.database.store import Store
 from internal.extractors.sites import (
     OTHER_SITE_ID, SITE_NAMES, Request, allowed_in_public_group, first_supported_url,
 )
+from internal.extractors.gallery import inline_item_count
 from internal.models.media import MediaItem
 from internal.util.process import finish_task
 
@@ -58,6 +60,7 @@ class Pending:
     request: Request
     expires: float
     public_group: bool = False
+    item_index: int = 0
 
 
 class Inline:
@@ -69,10 +72,15 @@ class Inline:
         self.tasks: set[asyncio.Task[None]] = set()
         self._expirations: dict[str, asyncio.TimerHandle] = {}
         self._closed = False
+        self._counts: OrderedDict[str, tuple[float, int]] = OrderedDict()
+        self._probes: dict[str, asyncio.Task[int]] = {}
+        self._probe_slots = asyncio.Semaphore(2)
         self.runner: JobRunner | None = None
         self.username = ""
 
-    def add(self, user_id: int, request: Request, public_group: bool = False) -> str:
+    def add(
+        self, user_id: int, request: Request, public_group: bool = False, item_index: int = 0,
+    ) -> str:
         if self._closed:
             raise RuntimeError("Inline delivery is closed.")
         now = time.monotonic()
@@ -80,7 +88,7 @@ class Inline:
             if item.expires <= now:
                 self._discard(key)
         task_id = secrets.token_hex(8)
-        self.pending[task_id] = Pending(user_id, request, now + 300, public_group)
+        self.pending[task_id] = Pending(user_id, request, now + 300, public_group, item_index)
         try:
             self._expirations[task_id] = asyncio.get_running_loop().call_later(
                 300, self._discard, task_id,
@@ -119,9 +127,10 @@ class Inline:
 
     async def close(self) -> None:
         self._closed = True
+        self._counts.clear()
         for task_id in list(self.pending):
             self._discard(task_id)
-        tasks = list(self.tasks)
+        tasks = list(self.tasks) + list(self._probes.values())
         for task in tasks:
             if not task.done() and not task.cancelling():
                 task.cancel()
@@ -132,6 +141,39 @@ class Inline:
             except asyncio.CancelledError:
                 await finish_task(cleanup)
                 raise
+
+    async def _probe_count(self, request: Request) -> int:
+        try:
+            async with asyncio.timeout(7), self._probe_slots:
+                count = await inline_item_count(request, self.settings)
+            if count is not None:
+                self._counts[request.key] = (time.monotonic() + 120, max(1, count))
+                self._counts.move_to_end(request.key)
+                while len(self._counts) > 256:
+                    self._counts.popitem(last=False)
+                return max(1, count)
+        except Exception:
+            pass
+        finally:
+            self._probes.pop(request.key, None)
+        return 1
+
+    async def _item_count(self, request: Request) -> int:
+        if request.extractor_id != "twitter":
+            return 1
+        if self.settings.caching:
+            cached = await self.store.cached_media(request.extractor_id, request.content_id)
+            if cached and inline_media_supported(cached):
+                return len(cached.items)
+        known = self._counts.get(request.key)
+        if known and known[0] > time.monotonic():
+            self._counts.move_to_end(request.key)
+            return known[1]
+        task = self._probes.get(request.key)
+        if task is None:
+            task = asyncio.create_task(self._probe_count(request))
+            self._probes[request.key] = task
+        return await asyncio.shield(task)
 
     async def query(self, _: Client, query: types.InlineQuery) -> None:
         if self._closed or (
@@ -150,21 +192,27 @@ class Inline:
         if group_context and not allowed_in_public_group(request):
             await query.answer([], cache_time=0, is_personal=True)
             return
-        task_id = self.add(query.from_user.id, request, public_group=group_context)
-        result = types.InlineQueryResultArticle(
-            title="Share media", id=task_id,
-            input_message_content=types.InputTextMessageContent(
-                "Preparing media… Tap Download if it does not start automatically.",
-                parse_mode=enums.ParseMode.DISABLED,
-                disable_web_page_preview=True,
-            ),
-            reply_markup=types.InlineKeyboardMarkup([[
-                types.InlineKeyboardButton(
-                    "Download", callback_data=f"inline:download:{task_id}",
+        count = await self._item_count(request)
+        if self._closed:
+            await query.answer([], cache_time=0, is_personal=True)
+            return
+        results = []
+        for index in range(count):
+            task_id = self.add(query.from_user.id, request, group_context, index)
+            results.append(types.InlineQueryResultArticle(
+                title=f"Share media {index + 1} of {count}" if count > 1 else "Share media", id=task_id,
+                input_message_content=types.InputTextMessageContent(
+                    "Preparing media… Tap Download if it does not start automatically.",
+                    parse_mode=enums.ParseMode.DISABLED,
+                    disable_web_page_preview=True,
                 ),
-            ]]),
-        )
-        await query.answer([result], cache_time=0, is_personal=True)
+                reply_markup=types.InlineKeyboardMarkup([[
+                    types.InlineKeyboardButton(
+                        "Download", callback_data=f"inline:download:{task_id}",
+                    ),
+                ]]),
+            ))
+        await query.answer(results, cache_time=0, is_personal=True)
 
     async def chosen(self, _: Client, chosen: types.ChosenInlineResult) -> None:
         if not chosen.inline_message_id:
@@ -211,12 +259,12 @@ class Inline:
             chat = await self.store.chat(user_id, "private")
             if self.settings.caching:
                 cached = await self.store.cached_media(request.extractor_id, request.content_id)
-                if cached and len(cached.items) == 1 and not stale_video_cache(cached):
+                if cached and inline_media_supported(cached) and not stale_video_cache(cached):
                     cached.url = request.url
                     check_group_nsfw(cached, chat, pending.public_group)
                     try:
                         await self._replace_media(
-                            inline_message_id, cached.items[0],
+                            inline_message_id, cached.items[pending.item_index],
                             format_caption(cached, chat, self.settings, self.username),
                         )
                         return
@@ -227,7 +275,7 @@ class Inline:
             )
             staged = delivery.messages
             await self._replace_media(
-                inline_message_id, delivery.media.items[0],
+                inline_message_id, delivery.media.items[pending.item_index],
                 format_caption(delivery.media, chat, self.settings, self.username),
             )
         except NoAttachments:

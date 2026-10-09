@@ -9,7 +9,7 @@ import pytest
 
 from internal.core.errors import MediaError
 from internal.core.media import _probe, _thumbnail, extract_audio, prepare
-from internal.extractors.gallery import download_gallery
+from internal.extractors.gallery import download_gallery, inline_item_count
 from internal.extractors.sites import Request
 from internal.models.media import Media, MediaItem
 from internal.util.process import finish_task, spawn_process
@@ -17,7 +17,8 @@ from internal.util.process import finish_task, spawn_process
 
 def settings(tmp_path):
     return SimpleNamespace(
-        max_file_size=2_000_000_000, max_duration=3600, proxy="",
+        max_file_size=2_000_000_000, max_duration=3600, proxy="", root=tmp_path,
+        downloads_dir=tmp_path / "downloads",
         site=lambda _: SimpleNamespace(edge_proxy="", download_proxy="", proxy="", disable_proxy=False),
         cookie_path=lambda _: tmp_path / "missing.txt",
     )
@@ -98,7 +99,8 @@ async def test_media_timeouts_reap_child(tmp_path, monkeypatch, operation):
 
 
 @pytest.mark.asyncio
-async def test_gallery_cancellation_kills_subprocess_group_and_drains_output(tmp_path, monkeypatch):
+@pytest.mark.parametrize("inline", [False, True])
+async def test_gallery_cancellation_kills_subprocess_group_and_drains_output(tmp_path, monkeypatch, inline):
     child_file = tmp_path / "child.pid"
     script = (
         "import subprocess, sys, time; "
@@ -108,10 +110,13 @@ async def test_gallery_cancellation_kills_subprocess_group_and_drains_output(tmp
         "sys.stderr.write('x' * 100000); sys.stderr.flush(); time.sleep(60)"
     )
     processes, started = await capture_sleeping_process(monkeypatch, script)
-    task = asyncio.create_task(download_gallery(
+    operation = inline_item_count(
+        Request("twitter", "post", "https://x.com/user/status/123"), settings(tmp_path),
+    ) if inline else download_gallery(
         Request("instagram", "post", "https://instagram.com/reel/post/"),
         settings(tmp_path), tmp_path,
-    ))
+    )
+    task = asyncio.create_task(operation)
     await started.wait()
     async with asyncio.timeout(5):
         while not child_file.exists():
@@ -123,6 +128,7 @@ async def test_gallery_cancellation_kills_subprocess_group_and_drains_output(tmp
     assert_reaped(processes[0])
     state = Path(f"/proc/{child_pid}/stat")
     assert not state.exists() or state.read_text().split()[2] == "Z"
+    assert not list((tmp_path / "downloads").glob("pyvd-inline-*"))
 
 
 @pytest.mark.asyncio

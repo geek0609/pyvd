@@ -28,6 +28,31 @@ def cookie_jar() -> CookieJar:
     return jar
 
 
+def test_inline_count_returns_playlist_size_without_saving_sources(monkeypatch, tmp_path, capsys) -> None:
+    job = {
+        "root": str(tmp_path), "workdir": str(tmp_path), "count_only": True,
+        "extractor_id": "twitter", "content_id": "123", "url": "https://x.com/user/status/123",
+    }
+    settings = SimpleNamespace(
+        proxy="", cookie_path=lambda _: tmp_path / "missing.txt",
+        site=lambda _: SimpleNamespace(edge_proxy="", download_proxy="", disable_proxy=False, proxy=""),
+    )
+    monkeypatch.setattr(stream_worker.sys, "stdin", io.StringIO(json.dumps(job)))
+    monkeypatch.setattr(stream_worker, "load_settings", lambda _: settings)
+    monkeypatch.setattr(stream_worker, "_extract_ytdlp", lambda *args: (
+        {"entries": [{"url": "https://cdn.example/first.mp4"}, {"url": "https://cdn.example/second.mp4"}]},
+        CookieJar(),
+    ))
+
+    def save(*args):
+        raise AssertionError("The inline count must not save source URLs or cookies")
+
+    monkeypatch.setattr(stream_worker, "save_extraction", save)
+    assert stream_worker.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"count": 2}
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_cookie_backed_extraction_keeps_cookiefile_and_format_selection(monkeypatch, tmp_path: Path) -> None:
     import yt_dlp
 

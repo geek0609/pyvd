@@ -34,6 +34,12 @@ def stale_video_cache(media: Media) -> bool:
     )
 
 
+def inline_media_supported(media: Media) -> bool:
+    return len(media.items) == 1 or (
+        media.extractor_id == "twitter" and 1 <= len(media.items) <= 20
+    )
+
+
 def check_group_nsfw(
     media: Media, chat: ChatSettings, public_group: bool, marked_nsfw: bool = False,
 ) -> None:
@@ -192,7 +198,7 @@ class JobRunner:
             cached = await self.store.cached_media(request.extractor_id, request.content_id) if self.settings.caching else None
             if cached and stale_video_cache(cached):
                 cached = None
-            if cached and (not inline or len(cached.items) == 1):
+            if cached and (not inline or inline_media_supported(cached)):
                 if marked_nsfw and not cached.nsfw:
                     await self.store.mark_media_nsfw(request.extractor_id, request.content_id)
                     cached.nsfw = True
@@ -263,7 +269,7 @@ class JobRunner:
                 (workdir / "streamed.mp4").unlink(missing_ok=True)
             media = await download(request, self.settings, workdir)
             media.nsfw = media.nsfw or marked_nsfw
-            if inline and len(media.items) != 1:
+            if inline and not inline_media_supported(media):
                 raise MediaError("Inline mode supports one media item per link.")
             if chat.kind == "group" and len(media.items) > chat.media_album_limit:
                 raise MediaError("This post exceeds this group's album limit.")

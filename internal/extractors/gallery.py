@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 from internal.config.settings import Settings
@@ -17,6 +18,13 @@ from internal.util.process import finish_task, kill_process_group, spawn_process
 
 
 GALLERY_SITES = {"instagram", "pinterest", "reddit", "threads", "ninegag"}
+TWITTER_OPTIONS = (
+    "-o", "extractor.twitter.text-tweets=true",
+    "-o", "extractor.twitter.quoted=true",
+    "-o", "extractor.twitter.tweet-endpoint=rest",
+    "-o", "extractor.twitter.cards=true",
+    "-o", 'extractor.twitter.cards-blacklist=["summary","summary_large_image"]',
+)
 PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 AUDIO_SUFFIXES = {".mp3", ".m4a", ".flac", ".ogg", ".opus"}
 SKIP_SUFFIXES = {".part", ".json", ".txt", ".ytdl"}
@@ -93,6 +101,59 @@ def _text_only_tweet(directory: Path, content_id: str) -> bool:
     )
 
 
+async def _inline_probe_output(command: list[str], job: bytes | None = None) -> bytes | None:
+    process = await spawn_process(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        stdin=asyncio.subprocess.PIPE if job else asyncio.subprocess.DEVNULL,
+    )
+    communication = asyncio.create_task(process.communicate(job) if job else process.communicate())
+    try:
+        stdout, _ = await asyncio.wait_for(asyncio.shield(communication), timeout=6)
+        return stdout if process.returncode == 0 else None
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        await terminate_process(process)
+        await finish_task(communication)
+
+
+async def inline_item_count(request: Request, settings: Settings) -> int | None:
+    """Count X attachments without downloading or retaining their source URLs."""
+    site = settings.site(request.extractor_id)
+    if site.edge_proxy:
+        return None
+    settings.downloads_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="pyvd-inline-", dir=settings.downloads_dir) as directory:
+        workdir = Path(directory)
+        job = json.dumps({
+            "root": str(settings.root), "workdir": directory, "count_only": True,
+            "extractor_id": request.extractor_id, "content_id": request.content_id,
+            "url": request.url,
+        }).encode()
+        stdout = await _inline_probe_output([
+            sys.executable, "-m", "internal.extractors.stream_worker",
+        ], job)
+        if stdout:
+            count = json.loads(stdout).get("count")
+            if type(count) is int and 0 <= count <= 20:
+                return count
+        cookie = workdir / "cookies.txt"
+        if not cookie.is_file():
+            cookie = job_cookie_file(settings, request.extractor_id, workdir)
+        command = [
+            sys.executable, "-m", "gallery_dl", "--config-ignore", "--quiet",
+            "--get-urls", "--range", "1-21", *TWITTER_OPTIONS,
+        ]
+        proxy = site.download_proxy or site.proxy or settings.proxy
+        if proxy and not site.disable_proxy:
+            command.extend(["--proxy", proxy])
+        if cookie:
+            command.extend(["--cookies", str(cookie)])
+        command.append(request.url)
+        stdout = await _inline_probe_output(command)
+        return min(20, sum(bool(line.strip()) for line in stdout.splitlines())) if stdout is not None else None
+
+
 async def download_gallery(request: Request, settings: Settings, workdir: Path) -> Media:
     site = settings.site(request.extractor_id)
     if site.edge_proxy:
@@ -114,11 +175,7 @@ async def download_gallery(request: Request, settings: Settings, workdir: Path) 
     ]
     if request.extractor_id == "twitter":
         command.extend([
-            "-o", "extractor.twitter.text-tweets=true",
-            "-o", "extractor.twitter.quoted=true",
-            "-o", "extractor.twitter.tweet-endpoint=rest",
-            "-o", "extractor.twitter.cards=true",
-            "-o", 'extractor.twitter.cards-blacklist=["summary","summary_large_image"]',
+            *TWITTER_OPTIONS,
             "-P", "metadata@post", "-O", "filename={tweet_id}.post.json",
         ])
     else:

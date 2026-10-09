@@ -117,9 +117,10 @@ are converted to MP3. The same file size and duration limits apply.
 Extracted music is cached by the video’s Telegram identity. Repeated `/music`
 requests reuse the uploaded audio without downloading or extracting it again.
 Group admins can use `/settings` for captions, silent delivery, marked media,
-album limits, and source link deletion. Inline mode supports one media item per
-link. The group NSFW switch blocks media marked by source metadata or `#nsfw`
-when disabled. When enabled, marked media is sent with a spoiler in public
+album limits, and source link deletion. Inline mode offers each attachment in
+an X post as a separate result in DMs and all group types. Other sites support
+one media item per inline link. The group NSFW switch blocks media marked by
+source metadata or `#nsfw` when disabled. When enabled, marked media is sent with a spoiler in public
 groups and without an automatic spoiler in private groups. Use `#spoiler` to
 request a spoiler separately. Sources without markers can still pass through.
 NSFW markers on cached videos are retained by video ID. `/music` rejects known

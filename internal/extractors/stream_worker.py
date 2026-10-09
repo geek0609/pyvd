@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from internal.config.settings import load_settings
 from internal.extractors.cookies import job_cookie_file
-from internal.extractors.downloader import DEFAULT_FORMAT, H264_FORMAT, _SilentYtdlpLogger
+from internal.extractors.downloader import DEFAULT_FORMAT, H264_FORMAT, _SilentYtdlpLogger, _entries
 from internal.extractors.extracted import save_extraction
 from internal.extractors.sites import Request
 from internal.extractors.source import PipeWriter, copy_source as _copy_http_source
@@ -90,6 +90,8 @@ def _extract_ytdlp(job: dict, settings, cookie: Path | None, proxy: str) -> tupl
         "skip_download": True,
         "logger": _SilentYtdlpLogger(),
     }
+    if job.get("count_only"):
+        options.update(socket_timeout=3, retries=0, extractor_retries=0)
     if job["extractor_id"] == "youtube":
         options["js_runtimes"] = {"deno": {}, "node": {}}
     if cookie:
@@ -301,6 +303,16 @@ def main() -> int:
     cookie = job_cookie_file(settings, job["extractor_id"], workdir)
     proxy = site.download_proxy or ("" if site.disable_proxy else site.proxy or settings.proxy)
     request = Request(job["extractor_id"], job["content_id"], job["url"])
+    if job.get("count_only"):
+        count = None
+        try:
+            info, _ = _extract_ytdlp(job, settings, cookie, proxy)
+            if info:
+                count = min(20, len(_entries(info)))
+        except Exception:
+            pass
+        print(json.dumps({"count": count}), flush=True)
+        return 0
     try:
         if job["extractor_id"] == "instagram":
             gallery_data, cookies = _extract_instagram(job, cookie, proxy)
