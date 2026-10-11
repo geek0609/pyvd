@@ -9,6 +9,7 @@ from hydrogram import Client, enums, filters, idle, types
 
 from internal.config.settings import Settings, load_settings
 from internal.bot.chat import is_public_group
+from internal.bot.delete import DELETE_PREFIX, add_delete_buttons, handle_delete
 from internal.bot.health import health_report
 from internal.bot.settings import handle_callback, show_settings
 from internal.bot.inline import Inline
@@ -33,6 +34,10 @@ def help_text(kind: str, public_group: bool = False, owner: bool = False) -> str
         "Use #skip to ignore a link, #spoiler to hide media, or #nsfw to mark it.",
     ]
     if kind == "group":
+        lines.append(
+            "Use the Delete button on downloaded media to remove it. "
+            "Only the link sender and group admins can do this."
+        )
         lines.append(
             "Group admins can use /settings to change captions, silent delivery, "
             "album limits, link deletion, and whether to allow marked media. "
@@ -303,11 +308,25 @@ class Bot:
     async def _link_message(self, message, request, kind: str, public_group: bool, tags: set[str]) -> None:
         try:
             chat = await self.store.chat(message.chat.id, kind)
-            await self.runner.run(
+            delivery = await self.runner.run(
                 request, chat, message.chat.id, reply_to=message.id,
                 spoiler="spoiler" in tags, marked_nsfw="nsfw" in tags,
                 public_group=public_group,
             )
+            if kind == "group":
+                requester_id = (
+                    message.from_user.id
+                    if message.from_user and not getattr(message, "sender_chat", None) else 0
+                )
+                try:
+                    await add_delete_buttons(
+                        self.client, self.settings.bot_token, delivery.messages, requester_id,
+                    )
+                except Exception:
+                    await message.reply(
+                        "⚠️ Media was sent, but its Delete button could not be added.",
+                        parse_mode=enums.ParseMode.DISABLED,
+                    )
             if kind == "group" and chat.delete_links:
                 try:
                     await message.delete()
@@ -328,12 +347,16 @@ class Bot:
 
     async def on_callback(self, _: Client, query: types.CallbackQuery) -> None:
         if not allowed(
-            self.settings, query.message.chat.id if query.message else None,
+            self.settings, query.message.chat.id if query.message and query.message.chat else None,
             query.from_user.id if query.from_user else None,
         ):
             await query.answer()
             return
         if await self.inline.callback(query):
+            return
+        if (query.data or "").startswith(DELETE_PREFIX) and await handle_delete(
+            self.client, self.settings.bot_token, self.bot_id, query,
+        ):
             return
         if await handle_callback(self.client, self.store, query):
             return

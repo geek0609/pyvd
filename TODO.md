@@ -1,5 +1,6 @@
 # PyVD improvements
 
+- [x] Add group media Delete buttons for link senders and group admins.
 - [x] Share each attachment of multi-item X posts through inline mode in all group types.
 - [x] Honor selected HTTP chunk sizes without changing video quality.
 - [x] Resume safe HTTP transfers with bounded retries.

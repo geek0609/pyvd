@@ -109,6 +109,12 @@ Queued chats take turns; cached media bypasses the download queue. Reply to your
 link or `/music` request with `/cancel` to stop your queued or running job.
 Request ownership exists only in memory while the job runs.
 
+Group media replies have a Delete button. Only the person who posted the link
+or a current group admin can use it. An album's button removes that album;
+anonymous posts can only be removed by admins. Buttons stay usable after a
+restart without storing download ownership. Inline results and DMs do not get
+this button.
+
 Confirmed text-only X posts are ignored; download and authentication failures
 still receive an error reply. Photo-only X posts use the gallery extractor.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music

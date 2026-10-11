@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 from hydrogram import enums
@@ -8,6 +9,7 @@ from hydrogram import enums
 from internal.core.queue import JobRegistry
 from internal.bot.main import Bot, allowed, bot_commands, chat_kind, help_text
 from internal.bot.chat import is_public_group
+from internal.bot.delete import delete_keyboard
 from internal.core.errors import AuthenticationRequired, MediaError, NoAttachments, NoMedia
 from internal.models.media import ChatSettings
 from internal.networking.proxy import hydrogram_proxy
@@ -43,6 +45,8 @@ def test_help_and_command_menus_describe_music_and_group_settings() -> None:
     assert "DM or group" in help_text("private")
     assert "/settings" not in help_text("private")
     assert "/settings" in help_text("group")
+    assert "Delete button" in help_text("group")
+    assert "Delete button" not in help_text("private")
     assert "/download" not in help_text("group")
     assert "DM or private group" in help_text("group", public_group=True)
     assert [command.command for command in bot_commands(False)] == [
@@ -165,8 +169,9 @@ async def test_public_group_handles_plain_links_without_commands(
                 request.extractor_id, kwargs["public_group"],
                 kwargs["marked_nsfw"], kwargs["spoiler"],
             ))
+            return SimpleNamespace(messages=[])
 
-    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset(), admins=frozenset()), Store())
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset(), admins=frozenset(), bot_token="test"), Store())
     bot.runner = Runner()
     await bot.on_message(None, Message())
     if bot.job_tasks:
@@ -207,8 +212,9 @@ async def test_plain_links_download_in_dm_and_private_group(
         jobs = JobRegistry()
         async def run(self, request, chat, target_chat_id, **kwargs):
             calls.append((request.extractor_id, chat.kind, kwargs["public_group"]))
+            return SimpleNamespace(messages=[])
 
-    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset()), Store())
+    bot = Bot(SimpleNamespace(), SimpleNamespace(whitelist=frozenset(), bot_token="test"), Store())
     bot.runner = Runner()
     await bot.on_message(None, Message())
     if bot.job_tasks:
@@ -352,3 +358,50 @@ async def test_start_registers_private_and_group_commands() -> None:
     assert menus[0][1] == {}
     assert [command.command for command in menus[1][0]][-1] == "settings"
     assert menus[1][1]["scope"].type == "all_group_chats"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "anonymous"), [("group", False), ("group", True), ("private", False)])
+async def test_delete_buttons_are_added_only_to_group_link_media_before_source_deletion(kind, anonymous):
+    events = []
+    message = SimpleNamespace(
+        id=10, chat=SimpleNamespace(id=-100), sender_chat=SimpleNamespace(id=-100) if anonymous else None,
+        from_user=SimpleNamespace(id=7), reply=AsyncMock(),
+    )
+    sent = SimpleNamespace(id=20, chat=message.chat, media_group_id=None)
+
+    async def edit(chat_id, message_id, **kwargs):
+        events.append("button")
+        assert (chat_id, message_id) == (-100, 20)
+        data = kwargs["reply_markup"].inline_keyboard[0][0].callback_data
+        expected = delete_keyboard("test", -100, 20, 0 if anonymous else 7)
+        assert data == expected.inline_keyboard[0][0].callback_data
+
+    async def delete():
+        events.append("source")
+
+    message.delete = AsyncMock(side_effect=delete)
+    client = SimpleNamespace(edit_message_reply_markup=AsyncMock(side_effect=edit))
+    store = SimpleNamespace(chat=AsyncMock(return_value=ChatSettings(-100, kind, True, False, False, 10, True)))
+    bot = Bot(client, SimpleNamespace(bot_token="test"), store)
+    bot.runner = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(messages=[sent])))
+    await bot._link_message(message, SimpleNamespace(), kind, False, set())
+    assert events == (["button", "source"] if kind == "group" else [])
+    message.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_button_failure_does_not_claim_successful_download_failed():
+    message = SimpleNamespace(
+        id=10, chat=SimpleNamespace(id=-100), from_user=SimpleNamespace(id=7),
+        sender_chat=None, reply=AsyncMock(),
+    )
+    sent = SimpleNamespace(id=20, chat=message.chat, media_group_id=None)
+    client = SimpleNamespace(edit_message_reply_markup=AsyncMock(side_effect=RuntimeError("Telegram request failed")))
+    store = SimpleNamespace(chat=AsyncMock(return_value=ChatSettings(-100, "group", True, False, False, 10, False)))
+    bot = Bot(client, SimpleNamespace(bot_token="test"), store)
+    bot.runner = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(messages=[sent])))
+    await bot._link_message(message, SimpleNamespace(), "group", False, set())
+    message.reply.assert_awaited_once_with(
+        "⚠️ Media was sent, but its Delete button could not be added.", parse_mode=enums.ParseMode.DISABLED,
+    )
