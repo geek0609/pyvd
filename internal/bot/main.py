@@ -9,7 +9,7 @@ from hydrogram import Client, enums, filters, idle, types
 
 from internal.config.settings import Settings, load_settings
 from internal.bot.chat import is_public_group
-from internal.bot.delete import DELETE_PREFIX, add_delete_buttons, handle_delete
+from internal.bot.delete import DELETE_PREFIXES, add_delete_buttons, handle_delete, send_delete_control
 from internal.bot.health import health_report
 from internal.bot.settings import handle_callback, show_settings
 from internal.bot.inline import Inline
@@ -36,6 +36,7 @@ def help_text(kind: str, public_group: bool = False, owner: bool = False) -> str
     if kind == "group":
         lines.append(
             "Use the Delete button on downloaded media to remove it. "
+            "Delete all on a separate message removes every media reply for its link. "
             "Only the link sender and group admins can do this."
         )
         lines.append(
@@ -323,10 +324,16 @@ class Bot:
                         self.client, self.settings.bot_token, delivery.messages, requester_id,
                     )
                 except Exception:
-                    await message.reply(
-                        "⚠️ Media was sent, but its Delete button could not be added.",
-                        parse_mode=enums.ParseMode.DISABLED,
-                    )
+                    try:
+                        await send_delete_control(
+                            self.client, self.settings.bot_token, delivery.messages,
+                            requester_id, message.id, chat.silent,
+                        )
+                    except Exception:
+                        await message.reply(
+                            "⚠️ Media was sent, but its Delete control could not be sent. Please try again later.",
+                            parse_mode=enums.ParseMode.DISABLED,
+                        )
             if kind == "group" and chat.delete_links:
                 try:
                     await message.delete()
@@ -354,7 +361,7 @@ class Bot:
             return
         if await self.inline.callback(query):
             return
-        if (query.data or "").startswith(DELETE_PREFIX) and await handle_delete(
+        if (query.data or "").startswith(DELETE_PREFIXES) and await handle_delete(
             self.client, self.settings.bot_token, self.bot_id, query,
         ):
             return

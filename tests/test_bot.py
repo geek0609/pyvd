@@ -9,7 +9,7 @@ from hydrogram import enums
 from internal.core.queue import JobRegistry
 from internal.bot.main import Bot, allowed, bot_commands, chat_kind, help_text
 from internal.bot.chat import is_public_group
-from internal.bot.delete import delete_keyboard
+from internal.bot.delete import CONTROL_TEXT, DELETE_ALL_PREFIX, delete_keyboard
 from internal.core.errors import AuthenticationRequired, MediaError, NoAttachments, NoMedia
 from internal.models.media import ChatSettings
 from internal.networking.proxy import hydrogram_proxy
@@ -391,17 +391,48 @@ async def test_delete_buttons_are_added_only_to_group_link_media_before_source_d
 
 
 @pytest.mark.asyncio
-async def test_button_failure_does_not_claim_successful_download_failed():
+async def test_button_failure_sends_control_with_keyboard_without_editing_it():
     message = SimpleNamespace(
         id=10, chat=SimpleNamespace(id=-100), from_user=SimpleNamespace(id=7),
         sender_chat=None, reply=AsyncMock(),
     )
     sent = SimpleNamespace(id=20, chat=message.chat, media_group_id=None)
-    client = SimpleNamespace(edit_message_reply_markup=AsyncMock(side_effect=RuntimeError("Telegram request failed")))
+    client = SimpleNamespace(
+        edit_message_reply_markup=AsyncMock(side_effect=RuntimeError("Telegram request failed")),
+        send_message=AsyncMock(),
+    )
+    store = SimpleNamespace(chat=AsyncMock(return_value=ChatSettings(-100, "group", True, False, False, 10, False)))
+    bot = Bot(client, SimpleNamespace(bot_token="test"), store)
+    bot.runner = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(messages=[sent])))
+    await bot._link_message(message, SimpleNamespace(), "group", False, set())
+    message.reply.assert_not_awaited()
+    client.edit_message_reply_markup.assert_awaited_once()
+    client.send_message.assert_awaited_once()
+    call = client.send_message.call_args
+    assert call.args == (-100, CONTROL_TEXT)
+    assert call.kwargs["reply_to_message_id"] == 20
+    assert call.kwargs["disable_notification"] is False
+    button = call.kwargs["reply_markup"].inline_keyboard[0][0]
+    assert button.text == "Delete all"
+    assert button.callback_data.startswith(DELETE_ALL_PREFIX)
+
+
+@pytest.mark.asyncio
+async def test_failed_delete_control_reports_that_failure_after_successful_media_upload():
+    message = SimpleNamespace(
+        id=10, chat=SimpleNamespace(id=-100), from_user=SimpleNamespace(id=7),
+        sender_chat=None, reply=AsyncMock(),
+    )
+    sent = SimpleNamespace(id=20, chat=message.chat, media_group_id=None)
+    client = SimpleNamespace(
+        edit_message_reply_markup=AsyncMock(side_effect=RuntimeError("Telegram request failed")),
+        send_message=AsyncMock(side_effect=RuntimeError("Telegram request failed")),
+    )
     store = SimpleNamespace(chat=AsyncMock(return_value=ChatSettings(-100, "group", True, False, False, 10, False)))
     bot = Bot(client, SimpleNamespace(bot_token="test"), store)
     bot.runner = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(messages=[sent])))
     await bot._link_message(message, SimpleNamespace(), "group", False, set())
     message.reply.assert_awaited_once_with(
-        "⚠️ Media was sent, but its Delete button could not be added.", parse_mode=enums.ParseMode.DISABLED,
+        "⚠️ Media was sent, but its Delete control could not be sent. Please try again later.",
+        parse_mode=enums.ParseMode.DISABLED,
     )

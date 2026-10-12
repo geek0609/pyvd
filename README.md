@@ -110,8 +110,10 @@ link or `/music` request with `/cancel` to stop your queued or running job.
 Request ownership exists only in memory while the job runs.
 
 Group media replies have a Delete button. Only the person who posted the link
-or a current group admin can use it. An album's button removes that album;
-anonymous posts can only be removed by admins. Buttons stay usable after a
+or a current group admin can use it. An album's button removes that album.
+If a button cannot be attached, PyVD sends a separate message with **Delete all**
+to remove every media reply for that link and the control message itself.
+Anonymous posts can only be removed by admins. Buttons stay usable after a
 restart without storing download ownership. Inline results and DMs do not get
 this button.
 
