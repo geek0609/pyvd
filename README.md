@@ -119,6 +119,8 @@ this button.
 
 Confirmed text-only X posts are ignored; download and authentication failures
 still receive an error reply. Photo-only X posts use the gallery extractor.
+The “Could not download media from this link.” warning is deleted after five
+minutes. Pending deletions exist only in memory and are cancelled on restart.
 Reply to a video sent by PyVD with `/music` to receive its audio as a music
 message. AAC and MP3 tracks keep their original quality; other audio tracks
 are converted to MP3. The same file size and duration limits apply.

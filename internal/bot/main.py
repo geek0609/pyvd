@@ -22,6 +22,7 @@ from internal.networking.proxy import hydrogram_proxy
 
 
 TAG_RE = re.compile(r"(?<!\w)#(skip|spoiler|nsfw)\b", re.IGNORECASE)
+DOWNLOAD_ERROR = "Could not download media from this link."
 
 
 def help_text(kind: str, public_group: bool = False, owner: bool = False) -> str:
@@ -103,6 +104,7 @@ class Bot:
         self.username = ""
         self.bot_id = 0
         self.job_tasks: set[asyncio.Task] = set()
+        self.error_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         me = await self.client.get_me()
@@ -265,6 +267,18 @@ class Bot:
             await self.runner.jobs.close()
         if self.job_tasks:
             await asyncio.gather(*self.job_tasks, return_exceptions=True)
+        pending = tuple(self.error_tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _delete_error_after(self, chat_id: int, message_id: int) -> None:
+        await asyncio.sleep(300)
+        try:
+            await self.client.delete_messages(chat_id, message_id, revoke=True)
+        except Exception:
+            pass
 
     async def _music_message(self, message, kind: str, public_group: bool) -> None:
         try:
@@ -342,7 +356,11 @@ class Bot:
         except NoAttachments:
             return
         except MediaError as exc:
-            await message.reply(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
+            reply = await message.reply(f"⚠️ {exc}", parse_mode=enums.ParseMode.DISABLED)
+            if str(exc) == DOWNLOAD_ERROR:
+                task = asyncio.create_task(self._delete_error_after(reply.chat.id, reply.id))
+                self.error_tasks.add(task)
+                task.add_done_callback(self.error_tasks.discard)
         except Exception:
             try:
                 await message.reply(

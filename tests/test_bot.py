@@ -292,6 +292,83 @@ async def test_download_error_sends_one_reply_without_temporary_status() -> None
     if bot.job_tasks:
         await asyncio.gather(*bot.job_tasks)
     assert replies == ["⚠️ The file exceeds the 2 GB limit."]
+    assert not bot.error_tasks
+
+
+@pytest.fixture
+def failed_link_bot():
+    def make(chat_type=enums.ChatType.PRIVATE, delete_error=None):
+        chat_id = 123 if chat_type == enums.ChatType.PRIVATE else -100
+        kind = "private" if chat_type == enums.ChatType.PRIVATE else "group"
+        chat = SimpleNamespace(id=chat_id, type=chat_type)
+        warning = SimpleNamespace(id=20, chat=chat)
+        message = SimpleNamespace(
+            id=10, chat=chat, reply=AsyncMock(return_value=warning), delete=AsyncMock(),
+        )
+        client = SimpleNamespace(delete_messages=AsyncMock(side_effect=delete_error))
+        store = SimpleNamespace(chat=AsyncMock(return_value=ChatSettings(
+            chat_id, kind, True, False, False, 10, True,
+        )))
+        bot = Bot(client, SimpleNamespace(), store)
+        bot.runner = SimpleNamespace(
+            jobs=JobRegistry(), run=AsyncMock(side_effect=NoMedia("Could not download media from this link.")),
+        )
+        return bot, message, kind
+
+    return make
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_type", [enums.ChatType.PRIVATE, enums.ChatType.GROUP, enums.ChatType.SUPERGROUP])
+@pytest.mark.parametrize("delete_error", [None, RuntimeError("Message already deleted or deletion denied")])
+async def test_download_warning_deletes_only_itself_after_five_minutes(
+    monkeypatch, failed_link_bot, chat_type, delete_error,
+):
+    started = asyncio.Event()
+    elapsed = asyncio.Event()
+
+    async def wait(seconds):
+        assert seconds == 300
+        started.set()
+        await elapsed.wait()
+
+    monkeypatch.setattr("internal.bot.main.asyncio.sleep", wait)
+    bot, message, kind = failed_link_bot(chat_type, delete_error)
+    await bot._link_message(message, SimpleNamespace(), kind, False, set())
+    message.reply.assert_awaited_once_with(
+        "⚠️ Could not download media from this link.", parse_mode=enums.ParseMode.DISABLED,
+    )
+    await asyncio.wait_for(started.wait(), 1)
+    bot.client.delete_messages.assert_not_awaited()
+    message.delete.assert_not_awaited()
+    pending = tuple(bot.error_tasks)
+    assert len(pending) == 1
+    elapsed.set()
+    await asyncio.wait_for(asyncio.gather(*pending), 1)
+    bot.client.delete_messages.assert_awaited_once_with(message.chat.id, 20, revoke=True)
+    assert not bot.error_tasks
+    message.delete.assert_not_awaited()
+    message.reply.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_pending_warning_deletions_without_waiting_five_minutes(monkeypatch, failed_link_bot):
+    started = asyncio.Event()
+
+    async def wait(seconds):
+        assert seconds == 300
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("internal.bot.main.asyncio.sleep", wait)
+    bot, message, kind = failed_link_bot()
+    await bot._link_message(message, SimpleNamespace(), kind, False, set())
+    await asyncio.wait_for(started.wait(), 1)
+    pending = tuple(bot.error_tasks)
+    await asyncio.wait_for(bot.close(), 1)
+    assert all(task.cancelled() for task in pending)
+    assert not bot.error_tasks
+    bot.client.delete_messages.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -337,6 +414,7 @@ async def test_text_only_posts_are_ignored_but_failures_reply(chat_type, usernam
     if bot.job_tasks:
         await asyncio.gather(*bot.job_tasks)
     assert replies == ([] if isinstance(error, NoAttachments) else [f"⚠️ {error}"])
+    assert not bot.error_tasks
 
 
 @pytest.mark.asyncio
